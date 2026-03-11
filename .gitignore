@@ -1,5 +1,7 @@
 # IA
 AGENTS.md
 PLAN.md
+TASKS.md
 
+# Ignore node modules
 node_modules/
