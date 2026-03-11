@@ -56,9 +56,38 @@ pub struct SettingsPayload {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-/// Generate a new identity keypair. I2P address is assigned later via `identity_updated` event.
+/// Return the current identity, or generate a fresh one if none exists.
+/// This ensures the frontend never overwrites keys that the SAM session was built with.
 #[tauri::command]
-pub async fn generate_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> {
+pub async fn generate_identity(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<IdentityInfo, String> {
+    let mut id_lock = state.identity.lock().await;
+
+    if let Some(keys) = id_lock.as_ref() {
+        // Identity already set — return current info (SAM may already be connected)
+        let connect_link = {
+            let i2p = state.i2p.lock().await;
+            if let Some(session) = i2p.as_ref() {
+                build_connect_link(&session.destination, &keys.ik_pub_hex(), &keys.spk_pub_hex())
+            } else {
+                String::new()
+            }
+        };
+        let b32 = {
+            let i2p = state.i2p.lock().await;
+            i2p.as_ref().map(|s| s.b32_addr.clone()).unwrap_or_default()
+        };
+        return Ok(IdentityInfo {
+            b32_addr: b32,
+            ik_pub_hex: keys.ik_pub_hex(),
+            spk_pub_hex: keys.spk_pub_hex(),
+            connect_link,
+        });
+    }
+
+    // No identity yet (first run or after wipe) — generate a new one
     let keys = IdentityKeys::generate();
     let info = IdentityInfo {
         b32_addr: String::new(),
@@ -66,7 +95,12 @@ pub async fn generate_identity(state: State<'_, AppState>) -> Result<IdentityInf
         spk_pub_hex: keys.spk_pub_hex(),
         connect_link: String::new(),
     };
-    *state.identity.lock().await = Some(keys);
+    *id_lock = Some(keys);
+    drop(id_lock);
+
+    // If SAM session becomes ready before frontend calls this again, the
+    // identity_updated event will carry the correct connect_link.
+    let _ = app;
     Ok(info)
 }
 
