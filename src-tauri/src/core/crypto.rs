@@ -204,20 +204,3 @@ fn aead_decrypt(key: &SecureBuffer, counter: u32, ciphertext: &[u8]) -> Result<V
         .decrypt(&nonce, ciphertext)
         .map_err(|_| anyhow!("decryption failed — invalid tag or corrupted message"))
 }
-
-// ── QR code ───────────────────────────────────────────────────────────────────
-
-/// Generate a white-on-black SVG QR code for the given data string.
-pub fn generate_qr_svg(data: &str) -> String {
-    use qrcode::{render::svg, EcLevel, QrCode};
-
-    let code = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::M)
-        .or_else(|_| QrCode::new(data.as_bytes()))
-        .expect("QR generation failed");
-
-    code.render::<svg::Color<'_>>()
-        .min_dimensions(200, 200)
-        .dark_color(svg::Color("#ffffff"))
-        .light_color(svg::Color("#000000"))
-        .build()
-}

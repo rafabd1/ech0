@@ -6,9 +6,8 @@ const initialState: AppState = {
   identity: null,
   session: null,
   messages: [],
-  settings: { ttl_seconds: 300, sam_address: "127.0.0.1:7656" },
-  i2pConnected: false,
-  samReachable: false,
+  settings: { ttl_seconds: 300 },
+  routerStatus: "idle",
   error: null,
 };
 
@@ -17,19 +16,15 @@ function reducer(state: AppState, action: AppAction): AppState {
     case "SET_IDENTITY":
       return { ...state, identity: action.payload, error: null };
 
-    case "UPDATE_IDENTITY_QR":
+    case "UPDATE_IDENTITY_ADDRESS":
       if (!state.identity) return state;
       return {
         ...state,
         identity: { ...state.identity, ...action.payload },
       };
 
-    case "SET_I2P_STATUS":
-      return {
-        ...state,
-        i2pConnected: action.payload.connected,
-        samReachable: action.payload.reachable,
-      };
+    case "SET_ROUTER_STATUS":
+      return { ...state, routerStatus: action.payload };
 
     case "SESSION_ESTABLISHED":
       return {
@@ -41,12 +36,7 @@ function reducer(state: AppState, action: AppAction): AppState {
       };
 
     case "SESSION_CLOSED":
-      return {
-        ...state,
-        session: null,
-        messages: [],
-        view: "setup",
-      };
+      return { ...state, session: null, messages: [], view: "setup" };
 
     case "SET_MESSAGES":
       return { ...state, messages: action.payload };
@@ -56,9 +46,6 @@ function reducer(state: AppState, action: AppAction): AppState {
       if (exists) return state;
       return { ...state, messages: [...state.messages, action.payload] };
     }
-
-    case "SET_VIEW":
-      return { ...state, view: action.payload };
 
     case "SET_SETTINGS":
       return { ...state, settings: action.payload };
@@ -70,9 +57,7 @@ function reducer(state: AppState, action: AppAction): AppState {
       return {
         ...initialState,
         settings: state.settings,
-        identity: state.identity
-          ? { ...state.identity, qr_svg: "" }
-          : null,
+        routerStatus: "connecting",
       };
 
     default:

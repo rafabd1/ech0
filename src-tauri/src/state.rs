@@ -61,15 +61,11 @@ pub struct ActiveSession {
 pub struct AppSettings {
     /// Message TTL in seconds. 0 = session-only.
     pub ttl_seconds: u64,
-    pub sam_address: String,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self {
-            ttl_seconds: 300,
-            sam_address: "127.0.0.1:7656".to_string(),
-        }
+        Self { ttl_seconds: 300 }
     }
 }
 
@@ -81,6 +77,8 @@ pub struct AppState {
     pub messages: Mutex<Vec<MessageEntry>>,
     pub settings: Mutex<AppSettings>,
     pub i2p: Mutex<Option<I2pSession>>,
+    /// SAMv3 TCP port of the embedded I2P router.
+    pub router_sam_port: Mutex<Option<u16>>,
 }
 
 impl Default for AppState {
@@ -91,6 +89,7 @@ impl Default for AppState {
             messages: Mutex::new(Vec::new()),
             settings: Mutex::new(AppSettings::default()),
             i2p: Mutex::new(None),
+            router_sam_port: Mutex::new(None),
         }
     }
 }

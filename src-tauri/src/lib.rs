@@ -2,8 +2,8 @@ mod commands;
 mod core;
 mod state;
 
-#[allow(unused_imports)]
-use tauri::Manager as _;
+use crate::core::crypto::IdentityKeys;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -26,9 +26,46 @@ pub fn run() {
             commands::messaging::get_messages,
         ])
         .setup(|app| {
-            // Start TTL background wiper
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn(core::ttl::ttl_wiper(handle));
+
+            // Generate a fresh identity immediately so SAM connect never fails due to missing keys
+            {
+                let state = handle.state::<state::AppState>();
+                let keys = IdentityKeys::generate();
+                *state.identity.try_lock().expect("identity lock") = Some(keys);
+            }
+
+            // TTL background wiper
+            tauri::async_runtime::spawn(core::ttl::ttl_wiper(handle.clone()));
+
+            // Start embedded I2P router and auto-connect to SAM
+            let handle2 = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri::Emitter;
+
+                let data_dir = handle2
+                    .path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from(".ech0_data"));
+
+                let _ = handle2.emit("router_status_changed", "bootstrapping");
+
+                match core::router::start_embedded_router(data_dir).await {
+                    Ok(sam_port) => {
+                        {
+                            let state = handle2.state::<state::AppState>();
+                            *state.router_sam_port.lock().await = Some(sam_port);
+                        }
+                        let _ = handle2.emit("router_status_changed", "connecting");
+                        commands::session::auto_connect_loop(handle2).await;
+                    }
+                    Err(e) => {
+                        log::error!("failed to start embedded I2P router: {}", e);
+                        let _ = handle2.emit("router_status_changed", "error");
+                    }
+                }
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())

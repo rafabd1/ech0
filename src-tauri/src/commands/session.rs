@@ -1,6 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{split, AsyncWriteExt};
@@ -9,7 +12,7 @@ use rand::rngs::OsRng;
 
 use crate::{
     core::{
-        crypto::{generate_qr_svg, x3dh_initiator, x3dh_responder, DoubleRatchet, IdentityKeys},
+        crypto::{x3dh_initiator, x3dh_responder, DoubleRatchet, IdentityKeys},
         memory::SecureBuffer,
         transport::{read_framed, write_framed, I2pSession},
     },
@@ -42,79 +45,78 @@ pub struct IdentityInfo {
     pub b32_addr: String,
     pub ik_pub_hex: String,
     pub spk_pub_hex: String,
-    pub qr_svg: String,
+    /// Shareable ech0:// link (empty until I2P session is established).
+    pub connect_link: String,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct SettingsPayload {
     pub ttl_seconds: u64,
-    pub sam_address: String,
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-/// Generate a new identity keypair. Called once on app startup.
+/// Generate a new identity keypair. I2P address is assigned later via `identity_updated` event.
 #[tauri::command]
 pub async fn generate_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> {
     let keys = IdentityKeys::generate();
-
-    let qr_data = serde_json::json!({
-        "dest": "",
-        "k": keys.ik_pub_hex(),
-        "s": keys.spk_pub_hex(),
-    })
-    .to_string();
-
     let info = IdentityInfo {
         b32_addr: String::new(),
         ik_pub_hex: keys.ik_pub_hex(),
         spk_pub_hex: keys.spk_pub_hex(),
-        qr_svg: generate_qr_svg(&qr_data),
+        connect_link: String::new(),
     };
-
     *state.identity.lock().await = Some(keys);
     Ok(info)
 }
 
-/// Connect to the I2P network via SAMv3 bridge.
-/// Emits `identity_updated` with the real I2P address and regenerated QR.
+/// Connect to the embedded I2P router via SAMv3 (manual trigger).
 #[tauri::command]
-pub async fn connect_i2p(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let sam_addr = state.settings.lock().await.sam_address.clone();
+pub async fn connect_i2p(app: AppHandle) -> Result<(), String> {
+    do_connect_i2p(app).await.map_err(|e| e.to_string())
+}
 
-    let session = I2pSession::connect(&sam_addr)
+/// Internal: connect to embedded SAM, build I2P session, emit events.
+pub async fn do_connect_i2p(app: AppHandle) -> anyhow::Result<()> {
+    let state = app.state::<AppState>();
+
+    let sam_port = state
+        .router_sam_port
+        .lock()
         .await
-        .map_err(|e| e.to_string())?;
+        .ok_or_else(|| anyhow::anyhow!("embedded router not ready"))?;
+
+    let sam_addr = format!("127.0.0.1:{}", sam_port);
+
+    let session = tokio::time::timeout(
+        tokio::time::Duration::from_secs(120),
+        I2pSession::connect(&sam_addr),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("SAM connection timed out"))?
+    .map_err(|e| anyhow::anyhow!("SAM connect: {}", e))?;
 
     let b32 = session.b32_addr.clone();
     let dest = session.destination.clone();
     let session_id = session.session_id.clone();
     let sam_clone = sam_addr.clone();
 
-    {
+    let connect_link = {
         let id_lock = state.identity.lock().await;
-        if let Some(keys) = id_lock.as_ref() {
-            let qr_data = serde_json::json!({
-                "dest": dest,
-                "k": keys.ik_pub_hex(),
-                "s": keys.spk_pub_hex(),
-            })
-            .to_string();
+        let keys = id_lock
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no identity -- call generate_identity first"))?;
+        build_connect_link(&dest, &keys.ik_pub_hex(), &keys.spk_pub_hex())
+    };
 
-            let qr_svg = generate_qr_svg(&qr_data);
-            let _ = app.emit(
-                "identity_updated",
-                serde_json::json!({ "b32_addr": b32, "qr_svg": qr_svg }),
-            );
-        }
-    }
+    let _ = app.emit(
+        "identity_updated",
+        serde_json::json!({ "b32_addr": b32, "connect_link": connect_link }),
+    );
 
     *state.i2p.lock().await = Some(session);
+    let _ = app.emit("router_status_changed", "ready");
 
-    // Start background accept loop
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         accept_loop(app_clone, session_id, sam_clone).await;
@@ -123,25 +125,45 @@ pub async fn connect_i2p(
     Ok(())
 }
 
-/// Accept loop: continuously listens for incoming I2P connections.
-async fn accept_loop(app: AppHandle, session_id: String, sam_addr: String) {
-
+/// Background retry loop: keeps trying to connect to SAM until it succeeds.
+pub async fn auto_connect_loop(app: AppHandle) {
     loop {
-        // Reconstruct a minimal session reference for accept
-        let accept_result = {
+        {
+            let state = app.state::<AppState>();
+            if state.i2p.lock().await.is_some() {
+                return;
+            }
+        }
+        match do_connect_i2p(app.clone()).await {
+            Ok(()) => return,
+            Err(e) => {
+                log::debug!("SAM connect attempt: {}, retrying in 5s", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Build an ech0:// shareable link from I2P destination and identity keys.
+fn build_connect_link(dest: &str, ik_hex: &str, spk_hex: &str) -> String {
+    let json = serde_json::json!({ "dest": dest, "k": ik_hex, "s": spk_hex }).to_string();
+    format!("ech0://{}", URL_SAFE_NO_PAD.encode(json.as_bytes()))
+}
+
+/// Accept loop: waits for incoming I2P stream connections for this session.
+async fn accept_loop(app: AppHandle, session_id: String, sam_addr: String) {
+    loop {
+        // Exit if the session was replaced or dropped (e.g. after panic_wipe)
+        let should_continue = {
             let state = app.state::<AppState>();
             let i2p = state.i2p.lock().await;
-if let Some(_session) = i2p.as_ref() {
-                drop(i2p);
-                // We can't call accept_once while holding the lock due to borrowing,
-                // so we use the session_id and sam_addr directly
-                accept_once_raw(&session_id, &sam_addr).await
-            } else {
-                break;
-            }
+            i2p.as_ref().map_or(false, |s| s.session_id == session_id)
         };
+        if !should_continue {
+            break;
+        }
 
-        match accept_result {
+        match accept_once_raw(&session_id, &sam_addr).await {
             Ok((peer_dest, tunnel)) => {
                 if let Err(e) = handle_incoming(&app, peer_dest, tunnel).await {
                     log::warn!("incoming session error: {}", e);
@@ -184,7 +206,7 @@ async fn read_sam_line_raw(stream: &mut tokio::net::TcpStream) -> anyhow::Result
     let mut buf = Vec::with_capacity(512);
     let mut byte = [0u8; 1];
     loop {
-        stream.read_exact(&mut byte).await?;
+        stream.read_exact(&mut byte[..]).await?;
         if byte[0] == b'\n' { break; }
         if buf.len() > 16_384 { return Err(anyhow::anyhow!("line too long")); }
         buf.push(byte[0]);
@@ -257,7 +279,7 @@ async fn handle_incoming(
     Ok(())
 }
 
-/// Initiate a session by scanning/pasting peer's QR payload.
+/// Initiate a session by pasting peer's ech0:// link or raw JSON payload.
 #[tauri::command]
 pub async fn initiate_session(
     state: State<'_, AppState>,
@@ -267,7 +289,19 @@ pub async fn initiate_session(
     #[derive(Deserialize)]
     struct PeerInfo { dest: String, k: String, s: String }
 
-    let peer: PeerInfo = serde_json::from_str(&peer_payload)
+    // Accept both ech0:// links and raw JSON
+    let json_str = if peer_payload.trim_start().starts_with("ech0://") {
+        let encoded = peer_payload.trim_start().trim_start_matches("ech0://");
+        let decoded = URL_SAFE_NO_PAD
+            .decode(encoded.trim())
+            .map_err(|e| format!("invalid ech0 link: {}", e))?;
+        String::from_utf8(decoded)
+            .map_err(|e| format!("invalid ech0 link encoding: {}", e))?
+    } else {
+        peer_payload.clone()
+    };
+
+    let peer: PeerInfo = serde_json::from_str(&json_str)
         .map_err(|e| format!("invalid peer payload: {}", e))?;
 
     if peer.dest.is_empty() || peer.k.is_empty() || peer.s.is_empty() {
@@ -435,27 +469,33 @@ pub async fn close_session(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Immediately zeroize all session and message state.
+/// Wipe all sensitive state: messages, session keys, identity, I2P session.
+/// Spawns a new auto-connect so the app recovers with a fresh I2P identity.
 #[tauri::command]
 pub async fn panic_wipe(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    // Drop session (zeroizes DoubleRatchet chain keys via SecureBuffer)
     {
         let mut sess = state.session.lock().await;
         if let Some(mut s) = sess.take() {
             let _ = s.stream_writer.shutdown().await;
         }
     }
-    // Zeroize all messages
     state.messages.lock().await.clear();
-    // Drop identity key material
     *state.identity.lock().await = None;
-    // Close I2P session
     *state.i2p.lock().await = None;
 
     let _ = app.emit("panic_wipe", ());
+    let _ = app.emit("router_status_changed", "connecting");
+
+    // Reconnect after wipe — new identity will be set by the frontend calling generate_identity
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+        auto_connect_loop(app_clone).await;
+    });
+
     Ok(())
 }
 
@@ -465,18 +505,13 @@ pub async fn update_settings(
     state: State<'_, AppState>,
     settings: SettingsPayload,
 ) -> Result<(), String> {
-    let mut s = state.settings.lock().await;
-    s.ttl_seconds = settings.ttl_seconds;
-    s.sam_address = settings.sam_address;
+    state.settings.lock().await.ttl_seconds = settings.ttl_seconds;
     Ok(())
 }
 
-/// Get current settings.
+/// Get current app settings.
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, String> {
     let s = state.settings.lock().await;
-    Ok(SettingsPayload {
-        ttl_seconds: s.ttl_seconds,
-        sam_address: s.sam_address.clone(),
-    })
+    Ok(SettingsPayload { ttl_seconds: s.ttl_seconds })
 }

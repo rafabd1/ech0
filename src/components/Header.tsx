@@ -1,16 +1,47 @@
 import { useStore } from "../store/sessionStore";
+import type { RouterStatus } from "../types";
 
 interface HeaderProps {
   onSettingsToggle: () => void;
-  onPanicWipe: () => void;
+  onWipeRequest: () => void;
 }
 
-export default function Header({ onSettingsToggle, onPanicWipe }: HeaderProps) {
+function RouterStatusDot({ status }: { status: RouterStatus }) {
+  const isReady = status === "ready";
+  const isPulsing = status === "bootstrapping" || status === "connecting";
+  const isError = status === "error";
+
+  const label =
+    status === "ready"
+      ? "i2p"
+      : status === "bootstrapping"
+      ? "boot"
+      : status === "connecting"
+      ? "sync"
+      : status === "error"
+      ? "err"
+      : "off";
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <span
+        className={[
+          "w-1.5 h-1.5 rounded-full",
+          isReady ? "bg-white" : isError ? "bg-muted" : isPulsing ? "bg-secondary animate-pulse" : "bg-muted",
+        ].join(" ")}
+      />
+      <span className="text-[10px] font-mono text-muted uppercase tracking-wider">
+        {label}
+      </span>
+    </div>
+  );
+}
+
+export default function Header({ onSettingsToggle, onWipeRequest }: HeaderProps) {
   const { state } = useStore();
 
   return (
     <header className="flex items-center justify-between px-4 h-12 border-b border-border shrink-0">
-      {/* Logo */}
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold tracking-[0.2em] text-white uppercase">
           ech0
@@ -22,21 +53,9 @@ export default function Header({ onSettingsToggle, onPanicWipe }: HeaderProps) {
         )}
       </div>
 
-      {/* Status + Controls */}
       <div className="flex items-center gap-3">
-        {/* I2P connection status */}
-        <div className="flex items-center gap-1.5">
-          <span
-            className={`w-1.5 h-1.5 rounded-full ${
-              state.i2pConnected ? "bg-white" : "bg-muted"
-            }`}
-          />
-          <span className="text-[10px] font-mono text-muted uppercase tracking-wider">
-            {state.i2pConnected ? "i2p" : "offline"}
-          </span>
-        </div>
+        <RouterStatusDot status={state.routerStatus} />
 
-        {/* Settings button */}
         <button
           onClick={onSettingsToggle}
           className="w-7 h-7 flex items-center justify-center rounded text-muted hover:text-white hover:bg-card transition-colors"
@@ -48,11 +67,10 @@ export default function Header({ onSettingsToggle, onPanicWipe }: HeaderProps) {
           </svg>
         </button>
 
-        {/* Panic wipe */}
         <button
-          onClick={onPanicWipe}
+          onClick={onWipeRequest}
           className="h-7 px-2.5 flex items-center gap-1.5 rounded border border-border text-muted hover:border-white hover:text-white transition-colors text-[10px] font-mono uppercase tracking-wider"
-          title="Panic wipe — destroys all data instantly"
+          title="Wipe all data"
         >
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="3 6 5 6 21 6" />
