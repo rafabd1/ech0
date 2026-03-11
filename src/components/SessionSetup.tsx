@@ -2,23 +2,30 @@ import { useState } from "react";
 import { useStore } from "../store/sessionStore";
 
 interface SessionSetupProps {
-  onConnectI2p: () => Promise<void>;
-  onInitiateSession: (qrPayload: string) => Promise<void>;
+  onInitiateSession: (payload: string) => Promise<void>;
 }
 
-export default function SessionSetup({ onConnectI2p, onInitiateSession }: SessionSetupProps) {
+export default function SessionSetup({ onInitiateSession }: SessionSetupProps) {
   const { state } = useStore();
   const [peerInput, setPeerInput] = useState("");
   const [connecting, setConnecting] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [tab, setTab] = useState<"show" | "connect">("show");
 
-  const handleConnectI2p = async () => {
-    setLoading(true);
+  const isReady = state.routerStatus === "ready";
+  const isLoading =
+    state.routerStatus === "bootstrapping" || state.routerStatus === "connecting";
+
+  const connectLink = state.identity?.connect_link ?? "";
+
+  const handleCopy = async () => {
+    if (!connectLink) return;
     try {
-      await onConnectI2p();
-    } finally {
-      setLoading(false);
+      await navigator.clipboard.writeText(connectLink);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback: select the text
     }
   };
 
@@ -47,93 +54,93 @@ export default function SessionSetup({ onConnectI2p, onInitiateSession }: Sessio
                 : "text-muted hover:text-secondary"
             }`}
           >
-            {t === "show" ? "your address" : "connect to peer"}
+            {t === "show" ? "your link" : "connect to peer"}
           </button>
         ))}
       </div>
 
       <div className="flex-1 overflow-y-auto flex flex-col items-center justify-center px-6 py-8 gap-6">
         {tab === "show" ? (
-          <>
-            {!state.i2pConnected ? (
-              <div className="flex flex-col items-center gap-4 text-center">
+          <div className="w-full max-w-xs flex flex-col gap-5">
+            {isLoading && (
+              <div className="flex flex-col items-center gap-3">
+                <div className="w-6 h-6 border border-secondary border-t-transparent rounded-full animate-spin" />
                 <p className="text-[11px] font-mono text-muted uppercase tracking-widest">
-                  i2p not connected
+                  {state.routerStatus === "bootstrapping"
+                    ? "bootstrapping i2p..."
+                    : "connecting to i2p..."}
                 </p>
-                <button
-                  onClick={handleConnectI2p}
-                  disabled={loading}
-                  className="px-4 py-2 border border-border rounded text-xs font-mono text-white hover:border-white disabled:opacity-40 transition-colors uppercase tracking-wider"
-                >
-                  {loading ? "connecting..." : "connect to i2p"}
-                </button>
-                <p className="text-[10px] text-muted max-w-xs leading-relaxed">
-                  requires i2pd or Java I2P running with SAM bridge enabled on{" "}
-                  <span className="font-mono">{state.settings.sam_address}</span>
+                <p className="text-[10px] text-muted text-center leading-relaxed max-w-xs">
+                  building anonymous tunnels. this may take up to 60 seconds on first run.
                 </p>
               </div>
-            ) : (
+            )}
+
+            {state.routerStatus === "error" && (
+              <p className="text-[11px] font-mono text-muted text-center">
+                i2p router error — check logs
+              </p>
+            )}
+
+            {isReady && connectLink && (
               <>
-                {/* QR code */}
-                {state.identity?.qr_svg ? (
-                  <div className="qr-container p-3 border border-border rounded-lg bg-card">
-                    <div
-                      dangerouslySetInnerHTML={{ __html: state.identity.qr_svg }}
-                      style={{ width: 200, height: 200 }}
-                    />
-                  </div>
-                ) : (
-                  <div className="w-[200px] h-[200px] border border-border rounded-lg bg-card flex items-center justify-center">
-                    <span className="text-[10px] font-mono text-muted">generating...</span>
-                  </div>
-                )}
-
-                {/* Address */}
-                {state.identity?.b32_addr && (
-                  <div className="w-full max-w-xs">
-                    <p className="text-[10px] font-mono text-muted uppercase tracking-widest mb-1.5">
-                      your address
+                <div>
+                  <p className="text-[10px] font-mono text-muted uppercase tracking-widest mb-1.5">
+                    your session link
+                  </p>
+                  <div className="bg-card border border-border rounded px-3 py-2.5">
+                    <p className="font-mono text-[9px] text-secondary break-all select-text leading-relaxed">
+                      {connectLink}
                     </p>
-                    <div className="bg-card border border-border rounded px-2.5 py-2">
-                      <p className="font-mono text-[10px] text-secondary break-all select-text leading-relaxed">
-                        {state.identity.b32_addr}
-                      </p>
-                    </div>
                   </div>
-                )}
+                </div>
 
-                <p className="text-[10px] text-muted text-center leading-relaxed max-w-xs">
-                  have your peer scan this QR or paste your address. no server involved.
+                <button
+                  onClick={handleCopy}
+                  className="w-full py-2.5 border border-border rounded text-xs font-mono text-white hover:border-white transition-colors uppercase tracking-widest"
+                >
+                  {copied ? "copied" : "copy link"}
+                </button>
+
+                <p className="text-[10px] text-muted text-center leading-relaxed">
+                  share this link with your peer. they paste it to initiate the session.
+                  no server involved.
                 </p>
               </>
             )}
-          </>
+
+            {state.routerStatus === "idle" && (
+              <p className="text-[11px] font-mono text-muted text-center uppercase tracking-widest">
+                starting router...
+              </p>
+            )}
+          </div>
         ) : (
           <div className="w-full max-w-xs flex flex-col gap-4">
             <div>
               <label className="text-[10px] font-mono text-muted uppercase tracking-widest block mb-1.5">
-                peer qr payload or address
+                paste peer link
               </label>
               <textarea
                 value={peerInput}
                 onChange={(e) => setPeerInput(e.target.value)}
-                placeholder={'{"dest":"...","k":"...","s":"..."}'}
-                rows={4}
+                placeholder="ech0://..."
+                rows={3}
                 className="w-full bg-card border border-border rounded px-3 py-2 text-[11px] font-mono text-white placeholder:text-muted focus:outline-none focus:border-secondary resize-none transition-colors"
               />
             </div>
 
             <button
               onClick={handleInitiate}
-              disabled={!peerInput.trim() || connecting || !state.i2pConnected}
+              disabled={!peerInput.trim() || connecting || !isReady}
               className="w-full py-2.5 border border-border rounded text-xs font-mono text-white hover:border-white disabled:opacity-40 transition-colors uppercase tracking-widest"
             >
-              {connecting ? "initiating..." : "initiate session"}
+              {connecting ? "connecting..." : "initiate session"}
             </button>
 
-            {!state.i2pConnected && (
+            {!isReady && (
               <p className="text-[10px] text-muted text-center">
-                connect to i2p first
+                {isLoading ? "waiting for i2p..." : "i2p not ready"}
               </p>
             )}
           </div>
