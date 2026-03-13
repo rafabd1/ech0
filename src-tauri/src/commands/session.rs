@@ -520,8 +520,12 @@ pub async fn close_session(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Core wipe logic — shared by the panic_wipe command and the Android lifecycle hook.
 pub async fn do_panic_wipe(app: AppHandle) {
-    use tauri::Emitter;
+    use tauri::{Emitter, Manager};
     let state = app.state::<AppState>();
+
+    // Capture before clearing: if the router never started, we must restart it.
+    let router_is_running = state.router_sam_port.lock().await.is_some();
+
     {
         let mut sess = state.session.lock().await;
         if let Some(mut s) = sess.take() {
@@ -531,14 +535,50 @@ pub async fn do_panic_wipe(app: AppHandle) {
     state.messages.lock().await.clear();
     *state.identity.lock().await = None;
     *state.i2p.lock().await = None;
-    *state.router_status.lock().await = "connecting".to_string();
+
+    // Status hint: if router is up just reconnect SAM; if not, we need to bootstrap first.
+    let initial_status = if router_is_running { "connecting" } else { "bootstrapping" };
+    *state.router_status.lock().await = initial_status.to_string();
     let _ = app.emit("panic_wipe", ());
-    let _ = app.emit("router_status_changed", "connecting");
+    let _ = app.emit("router_status_changed", initial_status);
 
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
-        auto_connect_loop(app_clone).await;
+
+        if router_is_running {
+            // Router is up — just create a fresh SAM session for a new I2P identity.
+            auto_connect_loop(app_clone).await;
+        } else {
+            // Router never started (failed on startup). Retry it now so the user
+            // can recover without restarting the app.
+            let data_dir = app_clone
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from(".ech0_data"));
+
+            let mut attempt = 0u32;
+            loop {
+                match crate::core::router::start_embedded_router(data_dir.clone()).await {
+                    Ok(sam_port) => {
+                        *app_clone.state::<AppState>().router_sam_port.lock().await = Some(sam_port);
+                        crate::set_router_status(&app_clone, "connecting").await;
+                        auto_connect_loop(app_clone).await;
+                        break;
+                    }
+                    Err(e) => {
+                        attempt += 1;
+                        let _ = e;
+                        if attempt >= 3 {
+                            crate::set_router_status(&app_clone, "error").await;
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                        crate::set_router_status(&app_clone, "bootstrapping").await;
+                    }
+                }
+            }
+        }
     });
 }
 

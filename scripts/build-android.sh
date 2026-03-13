@@ -112,6 +112,62 @@ setup_ndk_wrappers() {
     log "NDK toolchain wrappers ready at $WRAPPER_DIR"
 }
 
+# ── APK signing ───────────────────────────────────────────────────────────────
+# Signs the APK so it can be installed on real devices without developer mode.
+# Release signing: set ANDROID_KEYSTORE_PATH + ANDROID_KEYSTORE_PASS +
+#                  ANDROID_KEY_ALIAS + ANDROID_KEY_PASS in the environment.
+# Debug signing:   a keystore is auto-generated at scripts/debug.keystore.
+
+sign_apk() {
+    local UNSIGNED_APK="$1"
+    local SIGNED_APK="${UNSIGNED_APK/unsigned/signed}"
+    local APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner"
+
+    if [[ ! -f "$APKSIGNER" ]]; then
+        log "apksigner not found at $APKSIGNER — skipping signing"
+        return 0
+    fi
+
+    if [[ -n "${ANDROID_KEYSTORE_PATH:-}" ]]; then
+        # ── Release keystore (from environment) ───────────────────────────────
+        log "Signing APK with release keystore..."
+        "$APKSIGNER" sign \
+            --ks "$ANDROID_KEYSTORE_PATH" \
+            --ks-key-alias "${ANDROID_KEY_ALIAS:-key0}" \
+            --ks-pass "pass:${ANDROID_KEYSTORE_PASS}" \
+            --key-pass "pass:${ANDROID_KEY_PASS:-$ANDROID_KEYSTORE_PASS}" \
+            --out "$SIGNED_APK" \
+            "$UNSIGNED_APK"
+    else
+        # ── Debug keystore (auto-generated for local testing) ─────────────────
+        local KEYSTORE="$ROOT/scripts/debug.keystore"
+        if [[ ! -f "$KEYSTORE" ]]; then
+            log "Generating debug keystore at $KEYSTORE..."
+            keytool -genkey -v \
+                -keystore "$KEYSTORE" \
+                -alias key0 \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -storepass android \
+                -keypass android \
+                -dname "CN=ech0 Debug, O=ech0, C=US" \
+                2>/dev/null
+        fi
+        log "Signing APK with debug keystore..."
+        "$APKSIGNER" sign \
+            --ks "$KEYSTORE" \
+            --ks-key-alias key0 \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "$SIGNED_APK" \
+            "$UNSIGNED_APK"
+    fi
+
+    log "Signed APK: $SIGNED_APK"
+    echo "$SIGNED_APK"
+}
+
 # ── Build ──────────────────────────────────────────────────────────────────────
 
 build() {
@@ -144,8 +200,17 @@ build() {
     fi
 
     echo ""
-    APK=$(find "$ROOT/src-tauri/gen/android/app/build/outputs/apk" -name "*.apk" 2>/dev/null | head -1)
-    [[ -n "$APK" ]] && log "APK: $APK" || log "Build complete (APK path not found, check output above)"
+    APK=$(find "$ROOT/src-tauri/gen/android/app/build/outputs/apk" -name "*unsigned*.apk" 2>/dev/null | head -1)
+    if [[ -z "$APK" ]]; then
+        APK=$(find "$ROOT/src-tauri/gen/android/app/build/outputs/apk" -name "*.apk" 2>/dev/null | head -1)
+    fi
+
+    if [[ -n "$APK" && -z "$DEBUG_FLAG" ]]; then
+        SIGNED=$(sign_apk "$APK")
+        [[ -n "$SIGNED" ]] && log "Final APK: $SIGNED" || log "APK (unsigned): $APK"
+    else
+        [[ -n "$APK" ]] && log "APK: $APK" || log "Build complete (APK path not found, check output above)"
+    fi
 }
 
 setup_packages
