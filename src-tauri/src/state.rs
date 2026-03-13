@@ -1,5 +1,4 @@
 use serde::Serialize;
-use std::sync::atomic::AtomicBool;
 use tokio::{
     io::WriteHalf,
     net::TcpStream,
@@ -82,11 +81,6 @@ pub struct AppState {
     pub router_sam_port: Mutex<Option<u16>>,
     /// Last known router status — queried by frontend on mount to avoid event race on release.
     pub router_status: Mutex<String>,
-    /// When `true`, the next focus-loss event on Android will NOT trigger a
-    /// panic wipe. The flag is consumed (reset to `false`) after one use.
-    /// This allows the user to copy a session link and switch apps to share it
-    /// without the app wiping itself.
-    pub suppress_next_wipe: AtomicBool,
 }
 
 impl Default for AppState {
@@ -99,7 +93,6 @@ impl Default for AppState {
             i2p: Mutex::new(None),
             router_sam_port: Mutex::new(None),
             router_status: Mutex::new("idle".to_string()),
-            suppress_next_wipe: AtomicBool::new(false),
         }
     }
 }

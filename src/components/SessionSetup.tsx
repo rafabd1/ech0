@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../store/sessionStore";
 
 interface SessionSetupProps {
@@ -22,9 +21,6 @@ export default function SessionSetup({ onInitiateSession }: SessionSetupProps) {
   const handleCopy = async () => {
     if (!connectLink) return;
     try {
-      // Suppress the Android wipe-on-focus-loss so the user can switch
-      // to another app to paste the link without triggering a panic wipe.
-      await invoke("suppress_wipe").catch(() => undefined);
       await navigator.clipboard.writeText(connectLink);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
