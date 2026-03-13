@@ -5,3 +5,9 @@ TASKS.md
 
 # Ignore node modules
 node_modules/
+
+# Build outputs
+dist/
+gen/
+target/
+.tauri/

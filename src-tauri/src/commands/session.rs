@@ -149,6 +149,7 @@ pub async fn do_connect_i2p(app: AppHandle) -> anyhow::Result<()> {
     );
 
     *state.i2p.lock().await = Some(session);
+    *state.router_status.lock().await = "ready".to_string();
     let _ = app.emit("router_status_changed", "ready");
 
     let app_clone = app.clone();
@@ -520,6 +521,7 @@ pub async fn panic_wipe(
     *state.identity.lock().await = None;
     *state.i2p.lock().await = None;
 
+    *state.router_status.lock().await = "connecting".to_string();
     let _ = app.emit("panic_wipe", ());
     let _ = app.emit("router_status_changed", "connecting");
 
@@ -548,4 +550,11 @@ pub async fn update_settings(
 pub async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, String> {
     let s = state.settings.lock().await;
     Ok(SettingsPayload { ttl_seconds: s.ttl_seconds })
+}
+
+/// Get current router status. Called by the frontend on mount to avoid
+/// missing events that fired before the WebView registered its listeners.
+#[tauri::command]
+pub async fn get_router_status(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.router_status.lock().await.clone())
 }

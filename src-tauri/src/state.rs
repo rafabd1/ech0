@@ -79,6 +79,8 @@ pub struct AppState {
     pub i2p: Mutex<Option<I2pSession>>,
     /// SAMv3 TCP port of the embedded I2P router.
     pub router_sam_port: Mutex<Option<u16>>,
+    /// Last known router status — queried by frontend on mount to avoid event race on release.
+    pub router_status: Mutex<String>,
 }
 
 impl Default for AppState {
@@ -90,6 +92,7 @@ impl Default for AppState {
             settings: Mutex::new(AppSettings::default()),
             i2p: Mutex::new(None),
             router_sam_port: Mutex::new(None),
+            router_status: Mutex::new("idle".to_string()),
         }
     }
 }
