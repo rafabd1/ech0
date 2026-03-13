@@ -30,7 +30,6 @@ pub fn run() {
             commands::session::initiate_session,
             commands::session::close_session,
             commands::session::panic_wipe,
-            commands::session::suppress_wipe,
             commands::session::update_settings,
             commands::session::get_settings,
             commands::session::get_router_status,
@@ -98,23 +97,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error building ech0")
         .run(|app_handle, event| {
-            // On Android: wipe when the app backgrounds (onPause) or is destroyed (onDestroy)
+            // On app exit: wipe when the app is destroyed (onDestroy).
+            // Note: we do NOT wipe on focus loss (Focused(false)) to allow users to
+            // switch apps to share links without data being wiped.
+            // Users can manually wipe via the UI if needed.
             #[cfg(target_os = "android")]
             match event {
-                tauri::RunEvent::WindowEvent {
-                    event: tauri::WindowEvent::Focused(false),
-                    ..
-                } => {
-                    let state = app_handle.state::<state::AppState>();
-                    // If the frontend signalled a link-share, skip this one wipe.
-                    if state.suppress_next_wipe.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                        return;
-                    }
-                    let app = app_handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        commands::session::do_panic_wipe(app).await;
-                    });
-                }
                 tauri::RunEvent::Exit => {
                     let app = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
