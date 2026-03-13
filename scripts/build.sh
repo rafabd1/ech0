@@ -90,6 +90,9 @@ if [[ "$TARGET" == "android" ]]; then
         npm run tauri android init
     fi
 
+    echo "==> Generating platform icons"
+    npx tauri icon src-tauri/icons/icon.png
+
     if [[ "$MODE" == "debug" ]]; then
         echo "==> Building Android APK (debug)"
         npm run tauri android build -- --debug

@@ -30,6 +30,7 @@ pub fn run() {
             commands::session::initiate_session,
             commands::session::close_session,
             commands::session::panic_wipe,
+            commands::session::suppress_wipe,
             commands::session::update_settings,
             commands::session::get_settings,
             commands::session::get_router_status,
@@ -104,6 +105,11 @@ pub fn run() {
                     event: tauri::WindowEvent::Focused(false),
                     ..
                 } => {
+                    let state = app_handle.state::<state::AppState>();
+                    // If the frontend signalled a link-share, skip this one wipe.
+                    if state.suppress_next_wipe.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
                     let app = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
                         commands::session::do_panic_wipe(app).await;
