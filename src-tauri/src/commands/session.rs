@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{split, AsyncWriteExt};
 use x25519_dalek::{PublicKey, StaticSecret};
 use rand::rngs::OsRng;
+use zeroize::Zeroize;
 
 use crate::{
     core::{
@@ -172,7 +173,9 @@ pub async fn auto_connect_loop(app: AppHandle) {
         match do_connect_i2p(app.clone()).await {
             Ok(()) => return,
             Err(e) => {
+                #[cfg(debug_assertions)]
                 log::debug!("SAM connect attempt: {}, retrying in 5s", e);
+                let _ = e;
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
         }
@@ -201,10 +204,13 @@ async fn accept_loop(app: AppHandle, session_id: String, sam_addr: String) {
         match accept_once_raw(&session_id, &sam_addr).await {
             Ok((peer_dest, tunnel)) => {
                 if let Err(e) = handle_incoming(&app, peer_dest, tunnel).await {
+                    #[cfg(debug_assertions)]
                     log::warn!("incoming session error: {}", e);
+                    let _ = e;
                 }
             }
             Err(e) => {
+                #[cfg(debug_assertions)]
                 log::warn!("STREAM ACCEPT failed: {}", e);
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }
@@ -280,13 +286,14 @@ async fn handle_incoming(
     let ik_a_pub = PublicKey::from(<[u8; 32]>::try_from(ik_a_bytes.as_slice())?);
     let ek_a_pub = PublicKey::from(<[u8; 32]>::try_from(ek_a_bytes.as_slice())?);
 
-    let root_key = {
+    let mut root_key = {
         let id = state.identity.lock().await;
         let keys = id.as_ref().ok_or_else(|| anyhow::anyhow!("no identity"))?;
         x3dh_responder(&keys.ik_secret, &keys.spk_secret, &ik_a_pub, &ek_a_pub)
     };
 
     let ratchet = DoubleRatchet::from_root_key(&root_key, false);
+    root_key.zeroize();
 
     // Send HANDSHAKE_ACK
     let ack = serde_json::to_vec(&HandshakeAck { t: "ack".into() })?;
@@ -356,13 +363,14 @@ pub async fn initiate_session(
     let ek_a = StaticSecret::random_from_rng(OsRng);
     let ek_a_pub = PublicKey::from(&ek_a);
 
-    let root_key = {
+    let mut root_key = {
         let id = state.identity.lock().await;
         let keys = id.as_ref().ok_or("no identity generated")?;
         x3dh_initiator(&keys.ik_secret, &ek_a, &ik_b_pub, &spk_b_pub)
     };
 
     let ratchet = DoubleRatchet::from_root_key(&root_key, true);
+    root_key.zeroize();
 
     // Dial peer
     let tunnel = {
@@ -428,11 +436,15 @@ async fn receive_loop(app: AppHandle, mut reader: tokio::io::ReadHalf<tokio::net
         match read_framed(&mut reader).await {
             Ok(frame) => {
                 if let Err(e) = handle_incoming_message(&app, &frame).await {
+                    #[cfg(debug_assertions)]
                     log::warn!("message handling error: {}", e);
+                    let _ = e;
                 }
             }
             Err(e) => {
+                #[cfg(debug_assertions)]
                 log::info!("peer stream closed: {}", e);
+                let _ = &e;
                 let state = app.state::<AppState>();
                 *state.session.lock().await = None;
                 let _ = app.emit("session_closed", ());
@@ -469,7 +481,7 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
         session.ratchet.decrypt(&ct, wire.n)?
     };
 
-    let content = String::from_utf8(plaintext_buf.as_bytes().to_vec())?;
+    let mut content = String::from_utf8(plaintext_buf.as_bytes().to_vec())?;
     let now = now_secs();
     let expires_at = if settings.ttl_seconds > 0 {
         now + settings.ttl_seconds
@@ -484,6 +496,8 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
         timestamp: now,
         expires_at,
     };
+    // Wipe plaintext intermediate — the content now lives only in SecureBuffer
+    unsafe { content.as_bytes_mut().zeroize(); }
 
     let view = MessageView::from(&entry);
     state.messages.lock().await.push(entry);

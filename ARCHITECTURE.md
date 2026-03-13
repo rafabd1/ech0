@@ -194,7 +194,7 @@ The frontend only receives sanitized views (`MessageView`, `IdentityInfo`) via T
 
 **Strict in-order delivery.** The ratchet counter must match `recv_count` exactly. Out-of-order or dropped messages cause decryption failure and session state divergence. No message skipping/buffering is implemented.
 
-**Log file.** Logging is disabled in release builds. In debug builds, logs are sent to stdout only (no file target), reducing forensic artifacts on disk.
+**Log file.** Logging is fully disabled in release builds — `tauri-plugin-log` is not registered and all `log::` macro call sites are compiled out via `#[cfg(debug_assertions)]`, eliminating both output and string literals from the release binary. In debug builds, logs are sent to stdout only (no file target).
 
 **Router cache forensics.** `i2p_router_cache.bin` is observable on disk. It contains only public I2P infrastructure router infos (no user identity, no destinations, no messages), but its presence confirms I2P usage.
 
@@ -202,6 +202,6 @@ The frontend only receives sanitized views (`MessageView`, `IdentityInfo`) via T
 
 **Cold boot.** Message content in RAM is vulnerable if the device is physically compromised during an active session before TTL fires or panic wipe is triggered. `mlock` mitigates swap risk on Unix; Windows has no equivalent guarantee.
 
-**No peer identity pinning.** The `ech0://` link contains the peer's public keys, but there is no certificate or long-term identity to pin across sessions. If an attacker intercepts the link before the peer receives it, they could substitute their own keys. The security model assumes the link is transmitted over a pre-existing trusted channel (e.g., Signal, in-person).
+**Safety numbers (v1).** A session fingerprint derived from `SHA256(IK_pub_a || IK_pub_b)` (sorted canonically) is displayed in the UI as 5 groups of 5 digits. Both peers can compare this value out-of-band to confirm no MITM key substitution occurred. However, there is no long-term identity to pin across sessions — the security model assumes the `ech0://` link is transmitted over a pre-existing trusted channel (e.g., Signal, in-person).
 
-**CSP disabled.** `tauri.conf.json` sets `"csp": null`. For a local-only WebView loading from Tauri's asset server this is low-risk, but enabling a strict CSP is recommended for production.
+**CSP.** `tauri.conf.json` enforces a strict Content Security Policy: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; connect-src ipc: http://ipc.localhost`. The `'unsafe-inline'` for styles is required by Tailwind CSS runtime utilities.

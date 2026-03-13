@@ -72,7 +72,9 @@ pub fn run() {
                         commands::session::auto_connect_loop(handle2).await;
                     }
                     Err(e) => {
+                        #[cfg(debug_assertions)]
                         log::error!("failed to start embedded I2P router: {}", e);
+                        let _ = e;
                         set_router_status(&handle2, "error").await;
                     }
                 }
