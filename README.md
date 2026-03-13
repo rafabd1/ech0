@@ -1,4 +1,4 @@
-﻿# ech0
+# ech0
 
 ![ech0](assets/ech0-glitch.gif)
 
@@ -28,6 +28,16 @@ On launch, ech0 starts an embedded I2P router and establishes an anonymous sessi
 Messages expire automatically by a configurable TTL (30s / 1m / 5m / session). The wipe button destroys all messages, session keys, and identity material immediately.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full cryptographic and transport design.
+
+---
+
+## Demo
+
+### Connect
+![ech0-connect-demo](assets/ech0-connect-demo.png)
+
+### Chat
+![ech0-chat-demo](assets/ech0-chat-demo.png)
 
 ---
 
