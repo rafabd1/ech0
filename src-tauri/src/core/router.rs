@@ -14,7 +14,8 @@ const CACHE_FILENAME: &str = "i2p_router_cache.bin";
 pub async fn start_embedded_router(data_dir: PathBuf) -> Result<u16> {
     let _ = tokio::fs::create_dir_all(&data_dir).await;
 
-    let sam_port = find_free_port()?;
+    let sam_tcp_port = find_free_port()?;
+    let sam_udp_port = find_free_udp_port()?;
     let routers = load_or_reseed(&data_dir).await;
 
     let mut ntcp2_key = [0u8; 32];
@@ -31,10 +32,10 @@ pub async fn start_embedded_router(data_dir: PathBuf) -> Result<u16> {
             key: ntcp2_key,
             iv: ntcp2_iv,
         }),
-        // SAMv3 bridge — local only
+        // SAMv3 bridge — local only; TCP and UDP ports found independently
         samv3_config: Some(SamConfig {
-            tcp_port: sam_port,
-            udp_port: sam_port + 1,
+            tcp_port: sam_tcp_port,
+            udp_port: sam_udp_port,
             host: "127.0.0.1".to_string(),
         }),
         routers,
@@ -50,8 +51,8 @@ pub async fn start_embedded_router(data_dir: PathBuf) -> Result<u16> {
 
     tokio::spawn(router);
     #[cfg(debug_assertions)]
-    log::info!("embedded I2P router started, SAM port: {}", sam_port);
-    Ok(sam_port)
+    log::info!("embedded I2P router started, SAM port: {}", sam_tcp_port);
+    Ok(sam_tcp_port)
 }
 
 async fn load_or_reseed(data_dir: &PathBuf) -> Vec<Vec<u8>> {
@@ -123,4 +124,11 @@ fn parse_router_cache(data: &[u8]) -> Vec<Vec<u8>> {
 fn find_free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     Ok(listener.local_addr()?.port())
+}
+
+/// Find a free UDP port independently of the TCP SAM port.
+/// Using sam_tcp_port + 1 is not safe — that port may be occupied.
+fn find_free_udp_port() -> Result<u16> {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+    Ok(socket.local_addr()?.port())
 }
