@@ -194,7 +194,7 @@ The frontend only receives sanitized views (`MessageView`, `IdentityInfo`) via T
 
 **Strict in-order delivery.** The ratchet counter must match `recv_count` exactly. Out-of-order or dropped messages cause decryption failure and session state divergence. No message skipping/buffering is implemented.
 
-**Log file.** `tauri-plugin-log` writes to a file in `app_data_dir` in release builds. This file may contain I2P peer destination IDs and session event metadata. The file target should be disabled for production releases.
+**Log file.** Logging is disabled in release builds. In debug builds, logs are sent to stdout only (no file target), reducing forensic artifacts on disk.
 
 **Router cache forensics.** `i2p_router_cache.bin` is observable on disk. It contains only public I2P infrastructure router infos (no user identity, no destinations, no messages), but its presence confirms I2P usage.
 

@@ -7,15 +7,22 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(
+    let mut builder = tauri::Builder::default();
+
+    // Logging only in debug builds — production has no log files
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(
             tauri_plugin_log::Builder::new()
-                .level(log::LevelFilter::Info)
+                .level(log::LevelFilter::Debug)
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::Stdout,
                 ))
                 .build(),
-        )
+        );
+    }
+
+    builder
         .manage(state::AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::session::generate_identity,
