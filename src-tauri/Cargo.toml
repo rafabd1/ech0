@@ -40,7 +40,12 @@ tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt-multi
 
 # Utilities
 uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
 
 # Android: compile OpenSSL from source (avoids cross-compilation pkg-config issues)
 [target.'cfg(target_os = "android")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
+
+# Patch emissary-util with fix for Rust 1.77+ compatibility (ToUsize trait)
+[patch.crates-io]
+emissary-util = { path = "../vendor/emissary-util" }

@@ -11,3 +11,6 @@ dist/
 gen/
 target/
 .tauri/
+
+# Vendored dependencies (local patches)
+vendor/

@@ -1108,6 +1108,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "libc",
  "log",
  "openssl",
  "rand 0.8.5",
@@ -1228,8 +1229,6 @@ dependencies = [
 [[package]]
 name = "emissary-util"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "248fd34de480406acee25c037ba90faa01b393de7a8fa4f583cce6ef7da311a5"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
