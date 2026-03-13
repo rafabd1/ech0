@@ -49,6 +49,7 @@ pub async fn start_embedded_router(data_dir: PathBuf) -> Result<u16> {
         .map_err(|e| anyhow::anyhow!("router init failed: {:?}", e))?;
 
     tokio::spawn(router);
+    #[cfg(debug_assertions)]
     log::info!("embedded I2P router started, SAM port: {}", sam_port);
     Ok(sam_port)
 }
@@ -59,14 +60,17 @@ async fn load_or_reseed(data_dir: &PathBuf) -> Vec<Vec<u8>> {
     if let Ok(data) = tokio::fs::read(&cache_path).await {
         let routers = parse_router_cache(&data);
         if routers.len() >= MIN_ROUTERS_CACHED {
+            #[cfg(debug_assertions)]
             log::info!("loaded {} cached I2P routers", routers.len());
             return routers;
         }
     }
 
+    #[cfg(debug_assertions)]
     log::info!("reseeding I2P routers (this may take a moment)...");
     match Reseeder::reseed(None, false).await {
         Ok(routers) => {
+            #[cfg(debug_assertions)]
             log::info!("reseeded {} I2P routers", routers.len());
             let router_bytes: Vec<Vec<u8>> =
                 routers.into_iter().map(|r| r.router_info).collect();
@@ -74,7 +78,9 @@ async fn load_or_reseed(data_dir: &PathBuf) -> Vec<Vec<u8>> {
             router_bytes
         }
         Err(e) => {
+            #[cfg(debug_assertions)]
             log::error!("reseed failed: {:?}", e);
+            let _ = e;
             vec![]
         }
     }
