@@ -49,3 +49,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 # Patch emissary-util with fix for Rust 1.77+ compatibility (ToUsize trait)
 [patch.crates-io]
 emissary-util = { path = "../vendor/emissary-util" }
+
+[profile.release]
+strip = true
+opt-level = 3

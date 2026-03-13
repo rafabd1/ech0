@@ -504,13 +504,10 @@ pub async fn close_session(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Wipe all sensitive state: messages, session keys, identity, I2P session.
-/// Spawns a new auto-connect so the app recovers with a fresh I2P identity.
-#[tauri::command]
-pub async fn panic_wipe(
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
+/// Core wipe logic — shared by the panic_wipe command and the Android lifecycle hook.
+pub async fn do_panic_wipe(app: AppHandle) {
+    use tauri::Emitter;
+    let state = app.state::<AppState>();
     {
         let mut sess = state.session.lock().await;
         if let Some(mut s) = sess.take() {
@@ -520,18 +517,25 @@ pub async fn panic_wipe(
     state.messages.lock().await.clear();
     *state.identity.lock().await = None;
     *state.i2p.lock().await = None;
-
     *state.router_status.lock().await = "connecting".to_string();
     let _ = app.emit("panic_wipe", ());
     let _ = app.emit("router_status_changed", "connecting");
 
-    // Reconnect after wipe — new identity will be set by the frontend calling generate_identity
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
         auto_connect_loop(app_clone).await;
     });
+}
 
+/// Wipe all sensitive state: messages, session keys, identity, I2P session.
+/// Spawns a new auto-connect so the app recovers with a fresh I2P identity.
+#[tauri::command]
+pub async fn panic_wipe(
+    _state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    do_panic_wipe(app).await;
     Ok(())
 }
 
@@ -557,4 +561,18 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload,
 #[tauri::command]
 pub async fn get_router_status(state: State<'_, AppState>) -> Result<String, String> {
     Ok(state.router_status.lock().await.clone())
+}
+
+/// Return the session fingerprint for out-of-band identity verification.
+/// Both peers must see the same value to confirm no MITM.
+#[tauri::command]
+pub async fn get_safety_numbers(state: State<'_, AppState>) -> Result<String, String> {
+    let id = state.identity.lock().await;
+    let keys = id.as_ref().ok_or("no identity")?;
+    let sess = state.session.lock().await;
+    let session = sess.as_ref().ok_or("no active session")?;
+    Ok(crate::core::crypto::safety_numbers(
+        keys.ik_public.as_bytes(),
+        &session.peer_ik_bytes,
+    ))
 }

@@ -26,7 +26,7 @@ export type AppView = "setup" | "chat";
 export interface AppState {
   view: AppView;
   identity: IdentityInfo | null;
-  session: { peer_dest: string } | null;
+  session: { peer_dest: string; safety_numbers: string | null } | null;
   messages: MessageView[];
   settings: AppSettings;
   routerStatus: RouterStatus;
@@ -38,6 +38,7 @@ export type AppAction =
   | { type: "UPDATE_IDENTITY_ADDRESS"; payload: { b32_addr: string; connect_link: string } }
   | { type: "SET_ROUTER_STATUS"; payload: RouterStatus }
   | { type: "SESSION_ESTABLISHED"; payload: { peer_dest: string } }
+  | { type: "SET_SAFETY_NUMBERS"; payload: string }
   | { type: "SESSION_CLOSED" }
   | { type: "SET_MESSAGES"; payload: MessageView[] }
   | { type: "ADD_MESSAGE"; payload: MessageView }
