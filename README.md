@@ -1,4 +1,6 @@
-# ech0
+﻿# ech0
+
+![ech0](assets/ech0-glitch.gif)
 
 [![GPL-3.0 License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/tauri-2.10-blue.svg)](https://tauri.app)
@@ -11,17 +13,17 @@ Ephemeral P2P encrypted messaging over I2P. No server, no accounts, no message p
 
 ## Properties
 
-- **End-to-end encrypted** — X3DH key agreement + Double Ratchet (ChaCha20-Poly1305)
-- **Anonymous transport** — all traffic routes through the embedded I2P router; no IPs exchanged
-- **No persistence** — messages live only in RAM, wiped by TTL or on demand
-- **Self-contained** — embedded I2P router, no external software required
-- **No accounts** — identity is ephemeral, generated fresh each session
+- **End-to-end encrypted** â€” X3DH key agreement + Double Ratchet (ChaCha20-Poly1305)
+- **Anonymous transport** â€” all traffic routes through the embedded I2P router; no IPs exchanged
+- **No persistence** â€” messages live only in RAM, wiped by TTL or on demand
+- **Self-contained** â€” embedded I2P router, no external software required
+- **No accounts** â€” identity is ephemeral, generated fresh each session
 
 ---
 
 ## How it works
 
-On launch, ech0 starts an embedded I2P router and establishes an anonymous session. Once ready, a shareable `ech0://` link is generated. Send it to your peer over any channel — when they paste it in, both sides perform an X3DH handshake over the I2P tunnel and begin exchanging encrypted messages.
+On launch, ech0 starts an embedded I2P router and establishes an anonymous session. Once ready, a shareable `ech0://` link is generated. Send it to your peer over any channel â€” when they paste it in, both sides perform an X3DH handshake over the I2P tunnel and begin exchanging encrypted messages.
 
 Messages expire automatically by a configurable TTL (30s / 1m / 5m / session). The wipe button destroys all messages, session keys, and identity material immediately.
 
@@ -48,16 +50,16 @@ Download the latest from the [Releases](../../releases) page:
 ### Common requirements (all platforms)
 
 - [Node.js 20+](https://nodejs.org)
-- [Rust via rustup](https://rustup.rs) — must use `rustup`, not a standalone installer
+- [Rust via rustup](https://rustup.rs) â€” must use `rustup`, not a standalone installer
 
 > **Dependency note:** `emissary-util` (the embedded I2P reseeder) requires a local patch for
 > compatibility with Rust 1.77+. The patch lives in `vendor/emissary-util/` and is wired up
-> via `[patch.crates-io]` in `src-tauri/Cargo.toml` — **no extra steps needed**, Cargo picks
+> via `[patch.crates-io]` in `src-tauri/Cargo.toml` â€” **no extra steps needed**, Cargo picks
 > it up automatically.
 
 ---
 
-### Desktop — Windows
+### Desktop â€” Windows
 
 **Additional requirements:**
 - [Visual Studio Build Tools 2022](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with **Desktop development with C++**
@@ -71,7 +73,7 @@ Output: `src-tauri\target\release\bundle\nsis\` and `\msi\`
 
 ---
 
-### Desktop — macOS
+### Desktop â€” macOS
 
 **Additional requirements:**
 - Xcode Command Line Tools: `xcode-select --install`
@@ -84,7 +86,7 @@ Output: `src-tauri/target/release/bundle/dmg/`
 
 ---
 
-### Desktop — Linux
+### Desktop â€” Linux
 
 **Additional requirements:**
 ```bash

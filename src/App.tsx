@@ -41,6 +41,10 @@ export default function App() {
 
     listen<{ peer_dest: string }>("session_established", (e) => {
       dispatch({ type: "SESSION_ESTABLISHED", payload: e.payload });
+      // Fetch safety numbers right after session is established
+      invoke<string>("get_safety_numbers")
+        .then((nums) => dispatch({ type: "SET_SAFETY_NUMBERS", payload: nums }))
+        .catch(() => undefined);
     }).then((u) => unlisten.push(u));
 
     listen("session_closed", () => {
@@ -130,16 +134,23 @@ export default function App() {
           <SessionSetup onInitiateSession={handleInitiateSession} />
         ) : (
           <>
-            <div className="shrink-0 px-4 py-2 border-b border-border flex items-center justify-between">
-              <p className="text-[10px] font-mono text-muted truncate max-w-[80%]">
-                {state.session.peer_dest}
-              </p>
-              <button
-                onClick={() => invoke("close_session").then(() => dispatch({ type: "SESSION_CLOSED" }))}
-                className="text-[10px] font-mono text-muted hover:text-white transition-colors uppercase tracking-wider"
-              >
-                end
-              </button>
+            <div className="shrink-0 px-4 py-2 border-b border-border">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-mono text-muted truncate max-w-[80%]">
+                  {state.session.peer_dest}
+                </p>
+                <button
+                  onClick={() => invoke("close_session").then(() => dispatch({ type: "SESSION_CLOSED" }))}
+                  className="text-[10px] font-mono text-muted hover:text-white transition-colors uppercase tracking-wider"
+                >
+                  end
+                </button>
+              </div>
+              {state.session.safety_numbers && (
+                <p className="text-[9px] font-mono text-muted mt-0.5 select-all" title="Compare this value with your peer to verify the session">
+                  verify: {state.session.safety_numbers}
+                </p>
+              )}
             </div>
             <ChatWindow />
             <MessageInput onSend={handleSendMessage} disabled={!state.session} />

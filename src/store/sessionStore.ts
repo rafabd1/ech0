@@ -29,11 +29,15 @@ function reducer(state: AppState, action: AppAction): AppState {
     case "SESSION_ESTABLISHED":
       return {
         ...state,
-        session: { peer_dest: action.payload.peer_dest },
+        session: { peer_dest: action.payload.peer_dest, safety_numbers: null },
         view: "chat",
         messages: [],
         error: null,
       };
+
+    case "SET_SAFETY_NUMBERS":
+      if (!state.session) return state;
+      return { ...state, session: { ...state.session, safety_numbers: action.payload } };
 
     case "SESSION_CLOSED":
       return { ...state, session: null, messages: [], view: "setup" };

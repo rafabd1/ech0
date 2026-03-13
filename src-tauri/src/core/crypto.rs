@@ -162,6 +162,32 @@ fn derive_root_key(dh1: &[u8], dh2: &[u8], dh3: &[u8]) -> [u8; 32] {
     root_key
 }
 
+// ── Safety Numbers ───────────────────────────────────────────────────────────
+
+/// Derive a verifiable session fingerprint from both parties' identity keys.
+/// Keys are sorted canonically so both sides produce the same value.
+/// Output: 5 groups of 5 decimal digits, e.g. "35162 20423 07501 94722 41589".
+pub fn safety_numbers(ik_a: &[u8; 32], ik_b: &[u8; 32]) -> String {
+    use sha2::Digest;
+    let (first, second) = if ik_a <= ik_b { (ik_a, ik_b) } else { (ik_b, ik_a) };
+    let mut input = [0u8; 64];
+    input[..32].copy_from_slice(first);
+    input[32..].copy_from_slice(second);
+    let hash = sha2::Sha256::digest(input);
+    (0..5)
+        .map(|i| {
+            let b = &hash[i * 5..(i + 1) * 5];
+            let n = ((b[0] as u64) << 32)
+                | ((b[1] as u64) << 24)
+                | ((b[2] as u64) << 16)
+                | ((b[3] as u64) << 8)
+                | (b[4] as u64);
+            format!("{:05}", n % 100_000)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ── KDF & AEAD ────────────────────────────────────────────────────────────────
 
 /// Chain KDF step following Signal's specification.

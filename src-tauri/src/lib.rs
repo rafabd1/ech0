@@ -35,6 +35,7 @@ pub fn run() {
             commands::session::get_router_status,
             commands::messaging::send_message,
             commands::messaging::get_messages,
+            commands::session::get_safety_numbers,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -79,8 +80,30 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error running ech0");
+        .build(tauri::generate_context!())
+        .expect("error building ech0")
+        .run(|app_handle, event| {
+            // On Android: wipe when the app backgrounds (onPause) or is destroyed (onDestroy)
+            #[cfg(target_os = "android")]
+            match event {
+                tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::Focused(false),
+                    ..
+                } => {
+                    let app = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        commands::session::do_panic_wipe(app).await;
+                    });
+                }
+                tauri::RunEvent::Exit => {
+                    let app = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        commands::session::do_panic_wipe(app).await;
+                    });
+                }
+                _ => {}
+            }
+        });
 }
 
 /// Update router status in AppState and emit the event.
