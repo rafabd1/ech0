@@ -25,6 +25,7 @@ pub fn run() {
             commands::session::panic_wipe,
             commands::session::update_settings,
             commands::session::get_settings,
+            commands::session::get_router_status,
             commands::messaging::send_message,
             commands::messaging::get_messages,
         ])
@@ -51,7 +52,7 @@ pub fn run() {
                     .app_data_dir()
                     .unwrap_or_else(|_| std::path::PathBuf::from(".ech0_data"));
 
-                let _ = handle2.emit("router_status_changed", "bootstrapping");
+                set_router_status(&handle2, "bootstrapping").await;
 
                 match core::router::start_embedded_router(data_dir).await {
                     Ok(sam_port) => {
@@ -59,12 +60,12 @@ pub fn run() {
                             let state = handle2.state::<state::AppState>();
                             *state.router_sam_port.lock().await = Some(sam_port);
                         }
-                        let _ = handle2.emit("router_status_changed", "connecting");
+                        set_router_status(&handle2, "connecting").await;
                         commands::session::auto_connect_loop(handle2).await;
                     }
                     Err(e) => {
                         log::error!("failed to start embedded I2P router: {}", e);
-                        let _ = handle2.emit("router_status_changed", "error");
+                        set_router_status(&handle2, "error").await;
                     }
                 }
             });
@@ -73,4 +74,12 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error running ech0");
+}
+
+/// Update router status in AppState and emit the event.
+pub async fn set_router_status(app: &tauri::AppHandle, status: &'static str) {
+    use tauri::Emitter;
+    let state = app.state::<state::AppState>();
+    *state.router_status.lock().await = status.to_string();
+    let _ = app.emit("router_status_changed", status);
 }

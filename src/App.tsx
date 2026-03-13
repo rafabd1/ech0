@@ -15,8 +15,13 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showWipeConfirm, setShowWipeConfirm] = useState(false);
 
-  // Generate identity on mount
+  // Sync initial state on mount
   useEffect(() => {
+    // Query current router status — avoids missing events emitted before WebView registered listeners
+    invoke<string>("get_router_status")
+      .then((s) => dispatch({ type: "SET_ROUTER_STATUS", payload: s as RouterStatus }))
+      .catch(() => undefined);
+
     invoke<IdentityInfo>("generate_identity")
       .then((info) => dispatch({ type: "SET_IDENTITY", payload: info }))
       .catch((e) => dispatch({ type: "SET_ERROR", payload: String(e) }));
