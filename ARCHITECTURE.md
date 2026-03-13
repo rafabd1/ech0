@@ -200,7 +200,7 @@ The frontend only receives sanitized views (`MessageView`, `IdentityInfo`) via T
 
 **I2P timing correlation.** A global passive adversary with visibility into I2P tunnel traffic can correlate entry and exit timing to de-anonymize sessions over time — identical limitation to Tor onion routing.
 
-**Cold boot.** Message content in RAM is vulnerable if the device is physically seized during an active session before TTL fires or panic wipe is triggered. `mlock` mitigates swap risk on Unix; Windows has no equivalent guarantee.
+**Cold boot.** Message content in RAM is vulnerable if the device is physically compromised during an active session before TTL fires or panic wipe is triggered. `mlock` mitigates swap risk on Unix; Windows has no equivalent guarantee.
 
 **No peer identity pinning.** The `ech0://` link contains the peer's public keys, but there is no certificate or long-term identity to pin across sessions. If an attacker intercepts the link before the peer receives it, they could substitute their own keys. The security model assumes the link is transmitted over a pre-existing trusted channel (e.g., Signal, in-person).
 
