@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  # ── Desktop builds (Windows / macOS / Linux) ───────────────────────────────
+  # ── Desktop builds (Windows / macOS / Linux) ──────────────────────────────────────────────
   build-desktop:
     strategy:
       fail-fast: false
@@ -49,6 +49,22 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
+      # Sync version from git tag (e.g. v1.2.3 -> 1.2.3) so bundle artifacts
+      # are named correctly (e.g. ech0_1.2.3_x64-setup.exe).
+      - name: Set version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          npm pkg set version="$VERSION"
+          node -e "
+            const fs = require('fs');
+            const p = 'src-tauri/tauri.conf.json';
+            const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            cfg.version = '$VERSION';
+            fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\\n');
+          "
+
       - name: Install frontend dependencies
         run: npm install
 
@@ -83,7 +99,7 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
 
-  # ── Android APK build ──────────────────────────────────────────────────────
+  # ── Android APK build ──────────────────────────────────────────────────────────────────────
   build-android:
     runs-on: ubuntu-latest
 
@@ -138,6 +154,20 @@ jobs:
           echo "NDK_HOME=$NDK_HOME"               >> $GITHUB_ENV
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT"   >> $GITHUB_ENV
 
+      # Sync version from git tag before building.
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          npm pkg set version="$VERSION"
+          node -e "
+            const fs = require('fs');
+            const p = 'src-tauri/tauri.conf.json';
+            const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            cfg.version = '$VERSION';
+            fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\n');
+          "
+
       - name: Install frontend dependencies
         run: npm install
 
@@ -147,14 +177,61 @@ jobs:
       - name: Build Android APK
         run: npm run tauri android build
 
+      # Sign the APK so it can be installed without enabling developer options.
+      # Requires the ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASS,
+      # ANDROID_KEY_ALIAS, and ANDROID_KEY_PASS secrets in the repo settings.
+      - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASS }}
+        run: |
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner"
+          UNSIGNED_APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*unsigned*.apk' | head -1)
+          if [[ -z "$UNSIGNED_APK" ]]; then
+            UNSIGNED_APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)
+          fi
+          SIGNED_APK="${UNSIGNED_APK/unsigned/signed}"
+          [[ -z "$SIGNED_APK" || "$SIGNED_APK" == "$UNSIGNED_APK" ]] && SIGNED_APK="${UNSIGNED_APK%.apk}-signed.apk"
+
+          if [[ -n "$KEYSTORE_BASE64" ]]; then
+            # Release signing via repository secrets
+            echo "$KEYSTORE_BASE64" | base64 --decode > /tmp/release.keystore
+            "$APKSIGNER" sign \
+              --ks /tmp/release.keystore \
+              --ks-key-alias "${KEY_ALIAS:-key0}" \
+              --ks-pass "pass:${KEYSTORE_PASS}" \
+              --key-pass "pass:${KEY_PASS:-$KEYSTORE_PASS}" \
+              --out "$SIGNED_APK" \
+              "$UNSIGNED_APK"
+            rm -f /tmp/release.keystore
+          else
+            # Fallback: debug-sign for CI testing
+            keytool -genkey -v \
+              -keystore /tmp/debug.keystore -alias key0 \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=ech0 Debug, O=ech0, C=US" 2>/dev/null
+            "$APKSIGNER" sign \
+              --ks /tmp/debug.keystore \
+              --ks-key-alias key0 \
+              --ks-pass pass:android --key-pass pass:android \
+              --out "$SIGNED_APK" \
+              "$UNSIGNED_APK"
+          fi
+          echo "SIGNED_APK=$SIGNED_APK" >> "$GITHUB_ENV"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: android
           if-no-files-found: error
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          path: |
+            ${{ env.SIGNED_APK }}
+            src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
-  # ── Create GitHub Release ──────────────────────────────────────────────────
+  # ── Create GitHub Release ────────────────────────────────────────────────────────────────────
   release:
     needs: [build-desktop, build-android]
     runs-on: ubuntu-latest

@@ -3,6 +3,9 @@ AGENTS.md
 PLAN.md
 TASKS.md
 
+# Android debug keystore (auto-generated; do not commit)
+scripts/debug.keystore
+
 # Ignore node modules
 node_modules/
 
