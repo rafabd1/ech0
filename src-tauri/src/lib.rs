@@ -62,20 +62,32 @@ pub fn run() {
 
                 set_router_status(&handle2, "bootstrapping").await;
 
-                match core::router::start_embedded_router(data_dir).await {
-                    Ok(sam_port) => {
-                        {
-                            let state = handle2.state::<state::AppState>();
-                            *state.router_sam_port.lock().await = Some(sam_port);
+                // Retry up to 3 times — on first run, reseeding can fail due to network
+                // issues or a busy port; a brief delay usually resolves it.
+                let mut attempt = 0u32;
+                loop {
+                    match core::router::start_embedded_router(data_dir.clone()).await {
+                        Ok(sam_port) => {
+                            {
+                                let state = handle2.state::<state::AppState>();
+                                *state.router_sam_port.lock().await = Some(sam_port);
+                            }
+                            set_router_status(&handle2, "connecting").await;
+                            commands::session::auto_connect_loop(handle2).await;
+                            break;
                         }
-                        set_router_status(&handle2, "connecting").await;
-                        commands::session::auto_connect_loop(handle2).await;
-                    }
-                    Err(e) => {
-                        #[cfg(debug_assertions)]
-                        log::error!("failed to start embedded I2P router: {}", e);
-                        let _ = e;
-                        set_router_status(&handle2, "error").await;
+                        Err(e) => {
+                            attempt += 1;
+                            #[cfg(debug_assertions)]
+                            log::error!("router start attempt {} failed: {}", attempt, e);
+                            let _ = e;
+                            if attempt >= 3 {
+                                set_router_status(&handle2, "error").await;
+                                break;
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                            set_router_status(&handle2, "bootstrapping").await;
+                        }
                     }
                 }
             });
