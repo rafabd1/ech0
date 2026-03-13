@@ -184,6 +184,9 @@ jobs:
       - name: Initialize Tauri Android project
         run: npm run tauri android init
 
+      - name: Generate app icons
+        run: npx tauri icon src-tauri/icons/icon.png
+
       - name: Build Android APK
         run: npm run tauri android build
 
