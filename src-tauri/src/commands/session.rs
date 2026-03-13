@@ -630,3 +630,15 @@ pub async fn get_safety_numbers(state: State<'_, AppState>) -> Result<String, St
         &session.peer_ik_bytes,
     ))
 }
+
+/// Tell the backend to skip the next focus-loss wipe.
+/// The frontend calls this right before copying the session link so the user
+/// can switch to another app to paste without triggering a panic wipe.
+/// The flag is consumed once (single use).
+#[tauri::command]
+pub async fn suppress_wipe(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .suppress_next_wipe
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
