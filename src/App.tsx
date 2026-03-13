@@ -110,7 +110,7 @@ export default function App() {
 
   return (
     <StoreContext.Provider value={{ state, dispatch }}>
-      <div className="h-full flex flex-col bg-black relative overflow-hidden">
+      <div className="h-full flex flex-col bg-black relative overflow-hidden safe-top safe-bottom">
         <Header
           onSettingsToggle={() => setShowSettings((v) => !v)}
           onWipeRequest={() => setShowWipeConfirm(true)}

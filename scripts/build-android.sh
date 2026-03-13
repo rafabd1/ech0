@@ -188,6 +188,9 @@ build() {
         npm run tauri android init
     fi
 
+    log "Generating platform icons from source..."
+    npx tauri icon src-tauri/icons/icon.png
+
     log "Building frontend..."
     npm run build
 
