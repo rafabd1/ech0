@@ -51,17 +51,27 @@ jobs:
 
       # Sync version from git tag (e.g. v1.2.3 -> 1.2.3) so bundle artifacts
       # are named correctly (e.g. ech0_1.2.3_x64-setup.exe).
+      # On Windows the MSI target only accepts numeric pre-release identifiers
+      # (≤ 65535), so non-numeric suffixes like -beta.1 or -rc.2 are stripped.
       - name: Set version from tag
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          # Strip non-numeric pre-release suffix for Windows MSI compatibility
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            TAURI_VERSION=$(echo "$VERSION" | sed 's/-[^0-9].*//')
+          else
+            TAURI_VERSION="$VERSION"
+          fi
+
           npm pkg set version="$VERSION"
           node -e "
             const fs = require('fs');
             const p = 'src-tauri/tauri.conf.json';
             const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
-            cfg.version = '$VERSION';
+            cfg.version = '$TAURI_VERSION';
             fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\\n');
           "
 
