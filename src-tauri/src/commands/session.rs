@@ -41,6 +41,14 @@ struct HandshakeAck {
     t: String,
 }
 
+/// Protocol error sent when a handshake is rejected (e.g. session already active).
+#[derive(Serialize, Deserialize)]
+struct ProtocolError {
+    t: String,
+    code: String,
+    msg: String,
+}
+
 #[derive(Serialize)]
 pub struct IdentityInfo {
     pub b32_addr: String,
@@ -263,8 +271,17 @@ async fn handle_incoming(
 ) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
 
-    // Reject if session already active
+    // Reject if session already active — send explicit error to initiator
     if state.session.lock().await.is_some() {
+        let (_, mut writer) = split(tunnel);
+        let err_frame = serde_json::to_vec(&ProtocolError {
+            t: "err".into(),
+            code: "session_active".into(),
+            msg: "peer already has an active session".into(),
+        })
+        .unwrap_or_default();
+        let _ = write_framed(&mut writer, &err_frame).await;
+        log::info!("rejected incoming connection from {}: session already active", peer_dest);
         return Ok(());
     }
 
@@ -401,10 +418,22 @@ pub async fn initiate_session(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Wait for ACK
+    // Wait for ACK (or protocol error)
     let ack_frame = read_framed(&mut reader)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Check if peer sent a protocol error instead of an ACK
+    if let Ok(err) = serde_json::from_slice::<ProtocolError>(&ack_frame) {
+        if err.t == "err" {
+            let user_msg = match err.code.as_str() {
+                "session_active" => "Peer already has an active session".to_string(),
+                _ => format!("Peer rejected connection: {}", err.msg),
+            };
+            return Err(user_msg);
+        }
+    }
+
     let ack: HandshakeAck = serde_json::from_slice(&ack_frame).map_err(|e| e.to_string())?;
     if ack.t != "ack" {
         return Err(format!("unexpected ack type: {}", ack.t));
