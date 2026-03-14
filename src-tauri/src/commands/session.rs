@@ -468,11 +468,24 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
         return Ok(());
     }
 
+    let state = app.state::<AppState>();
+    
+    // Check for duplicate message to provide idempotency on network redelivery
+    let mut received_ids = state.received_message_ids.lock().await;
+    if received_ids.contains(&wire.id) {
+        // Duplicate message - skip silently
+        #[cfg(debug_assertions)]
+        log::debug!("duplicate message ignored: {}", wire.id);
+        drop(received_ids);
+        return Ok(());
+    }
+    received_ids.insert(wire.id.clone());
+    drop(received_ids);
+
     let ct = B64
         .decode(&wire.ct)
         .map_err(|e| anyhow::anyhow!("base64 decode: {}", e))?;
 
-    let state = app.state::<AppState>();
     let settings = state.settings.lock().await.clone();
 
     let plaintext_buf = {
@@ -515,6 +528,8 @@ pub async fn close_session(state: State<'_, AppState>) -> Result<(), String> {
         let _ = s.stream_writer.shutdown().await;
     }
     state.messages.lock().await.clear();
+    // Clear message ID tracking so new session can receive same IDs
+    state.received_message_ids.lock().await.clear();
     Ok(())
 }
 
