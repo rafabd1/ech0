@@ -307,6 +307,8 @@ async fn handle_incoming(
         ratchet,
         stream_writer: writer,
         started_at: now_secs(),
+        send_seq: 0,
+        recv_seq: 0,
     });
 
     // Emit session established event
@@ -418,6 +420,8 @@ pub async fn initiate_session(
         ratchet,
         stream_writer: writer,
         started_at: now_secs(),
+        send_seq: 0,
+        recv_seq: 0,
     });
 
     let _ = app.emit("session_established", serde_json::json!({ "peer_dest": peer_dest }));
@@ -460,6 +464,12 @@ struct WireMessage {
     id: String,
     ct: String,
     n: u32,
+    /// Sender-side sequence number for ordering enforcement
+    #[serde(default)]
+    seq: u64,
+    /// Sender-side unix timestamp (seconds)
+    #[serde(default)]
+    ts: u64,
 }
 
 async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Result<()> {
@@ -478,6 +488,21 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
     let plaintext_buf = {
         let mut sess = state.session.lock().await;
         let session = sess.as_mut().ok_or_else(|| anyhow::anyhow!("no session"))?;
+
+        // Enforce message ordering via sender sequence number
+        if wire.seq != session.recv_seq {
+            log::warn!(
+                "out-of-order message: expected seq={}, got seq={}",
+                session.recv_seq,
+                wire.seq
+            );
+            // Still process but warn — I2P may reorder occasionally
+        }
+        // Advance expected sequence to the maximum seen + 1
+        if wire.seq >= session.recv_seq {
+            session.recv_seq = wire.seq + 1;
+        }
+
         session.ratchet.decrypt(&ct, wire.n)?
     };
 
@@ -489,11 +514,14 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
         0
     };
 
+    // Use sender timestamp if provided, fall back to local time
+    let msg_timestamp = if wire.ts > 0 { wire.ts } else { now };
+
     let entry = MessageEntry {
         id: wire.id.clone(),
         content: SecureBuffer::from_slice(content.as_bytes()),
         is_mine: false,
-        timestamp: now,
+        timestamp: msg_timestamp,
         expires_at,
     };
     // Wipe plaintext intermediate — the content now lives only in SecureBuffer
