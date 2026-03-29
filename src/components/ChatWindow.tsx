@@ -95,9 +95,15 @@ export default function ChatWindow() {
     );
   }
 
+  // Sort messages by timestamp then by id for consistent ordering
+  const sorted = [...state.messages].sort((a, b) => {
+    if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+    return a.id.localeCompare(b.id);
+  });
+
   return (
     <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-2">
-      {state.messages.map((msg) => (
+      {sorted.map((msg) => (
         <MessageBubble key={msg.id} msg={msg} />
       ))}
       <div ref={bottomRef} />
