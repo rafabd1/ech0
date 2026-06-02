@@ -8,6 +8,7 @@ const initialState: AppState = {
   messages: [],
   settings: { ttl_seconds: 300 },
   routerStatus: "idle",
+  connectionProgress: null,
   error: null,
 };
 
@@ -26,12 +27,16 @@ function reducer(state: AppState, action: AppAction): AppState {
     case "SET_ROUTER_STATUS":
       return { ...state, routerStatus: action.payload };
 
+    case "SET_CONNECTION_PROGRESS":
+      return { ...state, connectionProgress: action.payload };
+
     case "SESSION_ESTABLISHED":
       return {
         ...state,
         session: { peer_dest: action.payload.peer_dest, safety_numbers: null },
         view: "chat",
         messages: [],
+        connectionProgress: null,
         error: null,
       };
 
@@ -40,7 +45,7 @@ function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, session: { ...state.session, safety_numbers: action.payload } };
 
     case "SESSION_CLOSED":
-      return { ...state, session: null, messages: [], view: "setup" };
+      return { ...state, session: null, messages: [], view: "setup", connectionProgress: null };
 
     case "SET_MESSAGES":
       return { ...state, messages: action.payload };

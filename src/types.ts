@@ -23,6 +23,12 @@ export interface AppSettings {
 
 export type AppView = "setup" | "chat";
 
+export interface ConnectionProgress {
+  attempt: number;
+  max_attempts: number;
+  status: "connecting" | "retrying" | "failed";
+}
+
 export interface AppState {
   view: AppView;
   identity: IdentityInfo | null;
@@ -30,6 +36,7 @@ export interface AppState {
   messages: MessageView[];
   settings: AppSettings;
   routerStatus: RouterStatus;
+  connectionProgress: ConnectionProgress | null;
   error: string | null;
 }
 
@@ -37,6 +44,7 @@ export type AppAction =
   | { type: "SET_IDENTITY"; payload: IdentityInfo }
   | { type: "UPDATE_IDENTITY_ADDRESS"; payload: { b32_addr: string; connect_link: string } }
   | { type: "SET_ROUTER_STATUS"; payload: RouterStatus }
+  | { type: "SET_CONNECTION_PROGRESS"; payload: ConnectionProgress | null }
   | { type: "SESSION_ESTABLISHED"; payload: { peer_dest: string } }
   | { type: "SET_SAFETY_NUMBERS"; payload: string }
   | { type: "SESSION_CLOSED" }
