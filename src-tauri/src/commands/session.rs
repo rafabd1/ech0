@@ -271,6 +271,22 @@ async fn handle_incoming(
 ) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
 
+    let session_gate = match state.session_gate.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            let (_, mut writer) = split(tunnel);
+            let err_frame = serde_json::to_vec(&ProtocolError {
+                t: "err".into(),
+                code: "session_busy".into(),
+                msg: "peer is already establishing a session".into(),
+            })
+            .unwrap_or_default();
+            let _ = write_framed(&mut writer, &err_frame).await;
+            log::info!("rejected incoming connection from {}: session establishment busy", peer_dest);
+            return Ok(());
+        }
+    };
+
     // Reject if session already active — send explicit error to initiator
     if state.session.lock().await.is_some() {
         let (_, mut writer) = split(tunnel);
@@ -335,6 +351,7 @@ async fn handle_incoming(
         receive_loop(app_clone, reader).await;
     });
 
+    drop(session_gate);
     Ok(())
 }
 
@@ -371,6 +388,14 @@ pub async fn initiate_session(
     let spk_b_bytes = hex::decode(&peer.s).map_err(|e| e.to_string())?;
     if ik_b_bytes.len() != 32 || spk_b_bytes.len() != 32 {
         return Err("invalid key lengths in peer info".into());
+    }
+
+    let session_gate = state
+        .session_gate
+        .try_lock()
+        .map_err(|_| "session establishment already in progress".to_string())?;
+    if state.session.lock().await.is_some() {
+        return Err("session already active".into());
     }
 
     let ik_b_pub = PublicKey::from(<[u8; 32]>::try_from(ik_b_bytes.as_slice()).unwrap());
@@ -456,6 +481,7 @@ pub async fn initiate_session(
         receive_loop(app_clone, reader).await;
     });
 
+    drop(session_gate);
     Ok(())
 }
 
