@@ -272,6 +272,7 @@ async fn accept_loop(app: AppHandle, session_id: String, sam_addr: String) {
             Err(e) => {
                 #[cfg(debug_assertions)]
                 log::warn!("STREAM ACCEPT failed: {}", e);
+                let _ = e;
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }
         }
