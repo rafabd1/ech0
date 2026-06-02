@@ -515,9 +515,16 @@ async fn receive_loop(app: AppHandle, mut reader: tokio::io::ReadHalf<tokio::net
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(e) => {
+                    let error_msg = format!("Decryption failed: {}", e);
+                    let _ = app.emit("decryption_error", error_msg);
+
+                    let state = app.state::<AppState>();
+                    *state.session.lock().await = None;
+                    let _ = app.emit("session_closed", ());
+
                     #[cfg(debug_assertions)]
-                    log::warn!("message handling error: {}", e);
-                    let _ = e;
+                    log::warn!("decryption error - closing session: {}", e);
+                    break;
                 }
             },
             Err(e) => {
@@ -581,7 +588,12 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
     let plaintext_buf = {
         let mut sess = state.session.lock().await;
         let session = sess.as_mut().ok_or_else(|| anyhow::anyhow!("no session"))?;
-        session.ratchet.decrypt(&ct, wire.n)?
+        // Log decryption attempt with context for debugging
+        #[cfg(debug_assertions)]
+        log::debug!("attempting to decrypt message with counter={}", wire.n);
+        
+        session.ratchet.decrypt(&ct, wire.n)
+            .map_err(|e| anyhow::anyhow!("ratchet decrypt failed (counter={}): {}", wire.n, e))?
     };
 
     let expected_seq = {
