@@ -312,6 +312,8 @@ async fn handle_incoming(
         ratchet,
         stream_writer: writer,
         started_at: now_secs(),
+        send_seq: 0,
+        recv_seq: 0,
     });
 
     // Emit session established event
@@ -423,6 +425,8 @@ pub async fn initiate_session(
         ratchet,
         stream_writer: writer,
         started_at: now_secs(),
+        send_seq: 0,
+        recv_seq: 0,
     });
 
     let _ = app.emit("session_established", serde_json::json!({ "peer_dest": peer_dest }));
@@ -469,6 +473,13 @@ struct WireMessage {
     n: u32,
 }
 
+#[derive(Deserialize)]
+struct EncryptedMessage {
+    body: String,
+    seq: u64,
+    ts: u64,
+}
+
 /// Generic wire envelope used to inspect the `t` field before full deserialization.
 #[derive(Deserialize)]
 struct WireEnvelope {
@@ -505,7 +516,25 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
         session.ratchet.decrypt(&ct, wire.n)?
     };
 
-    let mut content = String::from_utf8(plaintext_buf.as_bytes().to_vec())?;
+    let expected_seq = {
+        let sess = state.session.lock().await;
+        sess.as_ref().map(|session| session.recv_seq).unwrap_or(0)
+    };
+    let mut payload: EncryptedMessage = serde_json::from_slice(plaintext_buf.as_bytes())?;
+    if payload.seq != expected_seq {
+        return Err(anyhow::anyhow!(
+            "message sequence mismatch: expected {}, got {}",
+            expected_seq,
+            payload.seq
+        ));
+    }
+    {
+        let mut sess = state.session.lock().await;
+        if let Some(session) = sess.as_mut() {
+            session.recv_seq = session.recv_seq.saturating_add(1);
+        }
+    }
+
     let now = now_secs();
     let expires_at = if settings.ttl_seconds > 0 {
         now + settings.ttl_seconds
@@ -515,13 +544,12 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
 
     let entry = MessageEntry {
         id: wire.id.clone(),
-        content: SecureBuffer::from_slice(content.as_bytes()),
+        content: SecureBuffer::from_slice(payload.body.as_bytes()),
         is_mine: false,
-        timestamp: now,
+        timestamp: payload.ts,
         expires_at,
     };
-    // Wipe plaintext intermediate — the content now lives only in SecureBuffer
-    unsafe { content.as_bytes_mut().zeroize(); }
+    unsafe { payload.body.as_bytes_mut().zeroize(); }
 
     let view = MessageView::from(&entry);
     state.messages.lock().await.push(entry);
