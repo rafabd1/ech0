@@ -22,7 +22,7 @@ CMDTOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11
 
 export ANDROID_HOME
 export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
-export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
+export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-amd64}"
 export PATH="$HOME/.cargo/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 
 log() { echo "==> $*"; }
@@ -39,7 +39,7 @@ setup_packages() {
         pkgs+=(nodejs)
     fi
 
-    command -v java  &>/dev/null || pkgs+=(openjdk-17-jdk-headless)
+    command -v java  &>/dev/null || pkgs+=(openjdk-21-jdk-headless)
     command -v unzip &>/dev/null || pkgs+=(unzip)
     command -v wget  &>/dev/null || pkgs+=(wget)
     command -v cc    &>/dev/null || pkgs+=(build-essential)
@@ -189,7 +189,7 @@ build() {
     fi
 
     log "Generating platform icons from source..."
-    npx tauri icon src-tauri/icons/icon.png
+    npx tauri icon src-tauri/icons/icon-source.png
 
     log "Building frontend..."
     npm run build
