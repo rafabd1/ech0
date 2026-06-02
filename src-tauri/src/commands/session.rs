@@ -41,6 +41,14 @@ struct HandshakeAck {
     t: String,
 }
 
+/// Protocol error sent when a handshake is rejected (e.g. session already active).
+#[derive(Serialize, Deserialize)]
+struct ProtocolError {
+    t: String,
+    code: String,
+    msg: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct SessionEnd {
     t: String,
@@ -268,8 +276,33 @@ async fn handle_incoming(
 ) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
 
-    // Reject if session already active
+    let session_gate = match state.session_gate.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            let (_, mut writer) = split(tunnel);
+            let err_frame = serde_json::to_vec(&ProtocolError {
+                t: "err".into(),
+                code: "session_busy".into(),
+                msg: "peer is already establishing a session".into(),
+            })
+            .unwrap_or_default();
+            let _ = write_framed(&mut writer, &err_frame).await;
+            log::info!("rejected incoming connection from {}: session establishment busy", peer_dest);
+            return Ok(());
+        }
+    };
+
+    // Reject if session already active — send explicit error to initiator
     if state.session.lock().await.is_some() {
+        let (_, mut writer) = split(tunnel);
+        let err_frame = serde_json::to_vec(&ProtocolError {
+            t: "err".into(),
+            code: "session_active".into(),
+            msg: "peer already has an active session".into(),
+        })
+        .unwrap_or_default();
+        let _ = write_framed(&mut writer, &err_frame).await;
+        log::info!("rejected incoming connection from {}: session already active", peer_dest);
         return Ok(());
     }
 
@@ -325,6 +358,7 @@ async fn handle_incoming(
         receive_loop(app_clone, reader).await;
     });
 
+    drop(session_gate);
     Ok(())
 }
 
@@ -361,6 +395,14 @@ pub async fn initiate_session(
     let spk_b_bytes = hex::decode(&peer.s).map_err(|e| e.to_string())?;
     if ik_b_bytes.len() != 32 || spk_b_bytes.len() != 32 {
         return Err("invalid key lengths in peer info".into());
+    }
+
+    let session_gate = state
+        .session_gate
+        .try_lock()
+        .map_err(|_| "session establishment already in progress".to_string())?;
+    if state.session.lock().await.is_some() {
+        return Err("session already active".into());
     }
 
     let ik_b_pub = PublicKey::from(<[u8; 32]>::try_from(ik_b_bytes.as_slice()).unwrap());
@@ -408,10 +450,22 @@ pub async fn initiate_session(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Wait for ACK
+    // Wait for ACK (or protocol error)
     let ack_frame = read_framed(&mut reader)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Check if peer sent a protocol error instead of an ACK
+    if let Ok(err) = serde_json::from_slice::<ProtocolError>(&ack_frame) {
+        if err.t == "err" {
+            let user_msg = match err.code.as_str() {
+                "session_active" => "Peer already has an active session".to_string(),
+                _ => format!("Peer rejected connection: {}", err.msg),
+            };
+            return Err(user_msg);
+        }
+    }
+
     let ack: HandshakeAck = serde_json::from_slice(&ack_frame).map_err(|e| e.to_string())?;
     if ack.t != "ack" {
         return Err(format!("unexpected ack type: {}", ack.t));
@@ -436,6 +490,7 @@ pub async fn initiate_session(
         receive_loop(app_clone, reader).await;
     });
 
+    drop(session_gate);
     Ok(())
 }
 

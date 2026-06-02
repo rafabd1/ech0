@@ -78,6 +78,7 @@ impl Default for AppSettings {
 pub struct AppState {
     pub identity: Mutex<Option<IdentityKeys>>,
     pub session: Mutex<Option<ActiveSession>>,
+    pub session_gate: Mutex<()>,
     pub messages: Mutex<Vec<MessageEntry>>,
     pub settings: Mutex<AppSettings>,
     pub i2p: Mutex<Option<I2pSession>>,
@@ -92,6 +93,7 @@ impl Default for AppState {
         Self {
             identity: Mutex::new(None),
             session: Mutex::new(None),
+            session_gate: Mutex::new(()),
             messages: Mutex::new(Vec::new()),
             settings: Mutex::new(AppSettings::default()),
             i2p: Mutex::new(None),
