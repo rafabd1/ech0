@@ -53,6 +53,10 @@ pub struct ActiveSession {
     /// Write half of the active I2P tunnel stream.
     pub stream_writer: WriteHalf<TcpStream>,
     pub started_at: u64,
+    /// Monotonic send-side sequence number for message ordering.
+    pub send_seq: u64,
+    /// Expected next receive-side sequence number for ordering enforcement.
+    pub recv_seq: u64,
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

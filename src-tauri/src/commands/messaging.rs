@@ -24,6 +24,13 @@ struct WireMessage<'a> {
     n: u32,
 }
 
+#[derive(Serialize)]
+struct EncryptedMessage<'a> {
+    body: &'a str,
+    seq: u64,
+    ts: u64,
+}
+
 /// Encrypt and send a message to the active peer.
 /// Returns the MessageView so the frontend can add it to the list immediately.
 #[tauri::command]
@@ -41,10 +48,19 @@ pub async fn send_message(
     let (ct, counter) = {
         let mut sess = state.session.lock().await;
         let session = sess.as_mut().ok_or("no active session")?;
-        session
+        let seq = session.send_seq;
+        let payload = serde_json::to_vec(&EncryptedMessage {
+            body: &content,
+            seq,
+            ts: now,
+        })
+        .map_err(|e| e.to_string())?;
+        let (ct, counter) = session
             .ratchet
-            .encrypt(content.as_bytes())
-            .map_err(|e| e.to_string())?
+            .encrypt(&payload)
+            .map_err(|e| e.to_string())?;
+        session.send_seq += 1;
+        (ct, counter)
     };
 
     let wire = serde_json::to_vec(&WireMessage {
