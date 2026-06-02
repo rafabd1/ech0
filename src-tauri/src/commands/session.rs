@@ -279,7 +279,7 @@ async fn handle_incoming(
     // Read HANDSHAKE_INIT with timeout (60 seconds given I2P latency)
     let frame = timeout(Duration::from_secs(60), read_framed(&mut reader))
         .await
-        .map_err(|_| anyhow::anyhow!("handshake timeout: peer did not send INIT within 60s"))?;
+        .map_err(|_| anyhow::anyhow!("handshake timeout: peer did not send INIT within 60s"))??;
     
     let init: HandshakeInit = serde_json::from_slice(&frame)?;
     if init.t != "hi" {
@@ -308,7 +308,7 @@ async fn handle_incoming(
     let ack = serde_json::to_vec(&HandshakeAck { t: "ack".into() })?;
     timeout(Duration::from_secs(30), write_framed(&mut writer, &ack))
         .await
-        .map_err(|_| anyhow::anyhow!("handshake timeout: failed to send ACK within 30s"))?;
+        .map_err(|_| anyhow::anyhow!("handshake timeout: failed to send ACK within 30s"))??;
 
     let peer_ik_bytes = <[u8; 32]>::try_from(ik_a_bytes.as_slice())?;
 
