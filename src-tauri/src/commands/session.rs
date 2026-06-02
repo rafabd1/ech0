@@ -396,15 +396,46 @@ pub async fn initiate_session(
         let tunnel = {
             let i2p = state.i2p.lock().await;
             let session = i2p.as_ref().ok_or("i2p not connected")?;
-            match session.connect_to_peer(&peer.dest).await {
-                Ok(t) => t,
-                Err(e) => {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(60),
+                session.connect_to_peer(&peer.dest),
+            )
+            .await
+            {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
                     let error_msg = format!("Connection failed (attempt {}/{}): {}", attempt, max_attempts, e);
                     let _ = app.emit("connection_error", error_msg);
                     
                     if attempt < max_attempts {
                         // Exponential backoff: 2s, 4s, 8s, 16s
                         let backoff_secs = 2u64.pow(attempt.min(4));
+                        let _ = app.emit(
+                            "connection_progress",
+                            serde_json::json!({
+                                "attempt": attempt,
+                                "max_attempts": max_attempts,
+                                "status": "retrying"
+                            })
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    let error_msg = format!("Connection timeout (attempt {}/{}) - peer did not respond within 60s", attempt, max_attempts);
+                    let _ = app.emit("connection_error", error_msg);
+
+                    if attempt < max_attempts {
+                        let backoff_secs = 2u64.pow(attempt.min(4));
+                        let _ = app.emit(
+                            "connection_progress",
+                            serde_json::json!({
+                                "attempt": attempt,
+                                "max_attempts": max_attempts,
+                                "status": "retrying"
+                            })
+                        );
                         tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
                     }
                     continue;
@@ -427,15 +458,49 @@ pub async fn initiate_session(
         })
         .map_err(|e| e.to_string())?;
 
-        if let Err(e) = write_framed(&mut writer, &init_msg).await {
-            let error_msg = format!("Handshake send failed (attempt {}/{}): {}", attempt, max_attempts, e);
-            let _ = app.emit("connection_error", error_msg);
-            
-            if attempt < max_attempts {
-                let backoff_secs = 2u64.pow(attempt.min(4));
-                tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(30),
+            write_framed(&mut writer, &init_msg),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let error_msg = format!("Handshake send failed (attempt {}/{}): {}", attempt, max_attempts, e);
+                let _ = app.emit("connection_error", error_msg);
+
+                if attempt < max_attempts {
+                    let backoff_secs = 2u64.pow(attempt.min(4));
+                    let _ = app.emit(
+                        "connection_progress",
+                        serde_json::json!({
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "status": "retrying"
+                        })
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                }
+                continue;
             }
-            continue;
+            Err(_) => {
+                let error_msg = format!("Handshake send timeout (attempt {}/{})", attempt, max_attempts);
+                let _ = app.emit("connection_error", error_msg);
+
+                if attempt < max_attempts {
+                    let backoff_secs = 2u64.pow(attempt.min(4));
+                    let _ = app.emit(
+                        "connection_progress",
+                        serde_json::json!({
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "status": "retrying"
+                        })
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                }
+                continue;
+            }
         }
 
         // Wait for ACK with timeout
@@ -499,7 +564,7 @@ pub async fn initiate_session(
 
     // All attempts failed
     let final_error = format!("Connection failed after {} attempts. Peer may be offline or I2P tunnel degraded.", max_attempts);
-    let _ = app.emit("connection_error", final_error);
+    let _ = app.emit("connection_error", final_error.clone());
     Err(final_error)
 }
 

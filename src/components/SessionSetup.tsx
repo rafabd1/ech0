@@ -17,6 +17,7 @@ export default function SessionSetup({ onInitiateSession }: SessionSetupProps) {
     state.routerStatus === "bootstrapping" || state.routerStatus === "connecting";
 
   const connectLink = state.identity?.connect_link ?? "";
+  const progress = state.connectionProgress;
 
   const handleCopy = async () => {
     if (!connectLink) return;
@@ -135,8 +136,18 @@ export default function SessionSetup({ onInitiateSession }: SessionSetupProps) {
               disabled={!peerInput.trim() || connecting || !isReady}
               className="w-full py-2.5 border border-border rounded text-xs font-mono text-white hover:border-white disabled:opacity-40 transition-colors uppercase tracking-widest"
             >
-              {connecting ? "connecting..." : "initiate session"}
+              {connecting && progress
+                ? `${progress.status} ${progress.attempt}/${progress.max_attempts}`
+                : connecting
+                  ? "connecting..."
+                  : "initiate session"}
             </button>
+
+            {connecting && progress && (
+              <p className="text-[10px] text-muted text-center">
+                attempt {progress.attempt} of {progress.max_attempts}
+              </p>
+            )}
 
             {!isReady && (
               <p className="text-[10px] text-muted text-center">
