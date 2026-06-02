@@ -1,6 +1,6 @@
 export type TtlOption = 30 | 60 | 300 | 0;
 
-export type RouterStatus = "idle" | "bootstrapping" | "connecting" | "ready" | "error";
+export type RouterStatus = "idle" | "bootstrapping" | "connecting" | "ready" | "degraded" | "error";
 
 export interface MessageView {
   id: string;

@@ -10,10 +10,13 @@ function RouterStatusDot({ status }: { status: RouterStatus }) {
   const isReady = status === "ready";
   const isPulsing = status === "bootstrapping" || status === "connecting";
   const isError = status === "error";
+  const isDegraded = status === "degraded";
 
   const label =
     status === "ready"
       ? "i2p"
+      : status === "degraded"
+      ? "slow"
       : status === "bootstrapping"
       ? "boot"
       : status === "connecting"
@@ -27,7 +30,7 @@ function RouterStatusDot({ status }: { status: RouterStatus }) {
       <span
         className={[
           "w-1.5 h-1.5 rounded-full",
-          isReady ? "bg-white" : isError ? "bg-muted" : isPulsing ? "bg-secondary animate-pulse" : "bg-muted",
+          isReady ? "bg-white" : isDegraded ? "bg-secondary" : isError ? "bg-muted" : isPulsing ? "bg-secondary animate-pulse" : "bg-muted",
         ].join(" ")}
       />
       <span className="text-[10px] font-mono text-muted uppercase tracking-wider">
