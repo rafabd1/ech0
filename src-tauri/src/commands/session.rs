@@ -7,6 +7,7 @@ use base64::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{split, AsyncWriteExt};
+use tokio::time::{timeout, Duration};
 use x25519_dalek::{PublicKey, StaticSecret};
 use rand::rngs::OsRng;
 use zeroize::Zeroize;
@@ -38,6 +39,19 @@ struct HandshakeInit {
 
 #[derive(Serialize, Deserialize)]
 struct HandshakeAck {
+    t: String,
+}
+
+/// Protocol error sent when a handshake is rejected (e.g. session already active).
+#[derive(Serialize, Deserialize)]
+struct ProtocolError {
+    t: String,
+    code: String,
+    msg: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SessionEnd {
     t: String,
 }
 
@@ -204,6 +218,10 @@ async fn accept_loop(app: AppHandle, session_id: String, sam_addr: String) {
         match accept_once_raw(&session_id, &sam_addr).await {
             Ok((peer_dest, tunnel)) => {
                 if let Err(e) = handle_incoming(&app, peer_dest, tunnel).await {
+                    // Emit user-visible error on handshake failure
+                    let error_msg = format!("Connection failed: {}", e);
+                    let _ = app.emit("connection_error", error_msg);
+                    
                     #[cfg(debug_assertions)]
                     log::warn!("incoming session error: {}", e);
                     let _ = e;
@@ -256,6 +274,7 @@ async fn read_sam_line_raw(stream: &mut tokio::net::TcpStream) -> anyhow::Result
 }
 
 /// Handle an incoming I2P connection: read handshake, compute X3DH, set session.
+/// All I/O operations are wrapped in timeouts to prevent indefinite hangs on degraded I2P tunnels.
 async fn handle_incoming(
     app: &AppHandle,
     peer_dest: String,
@@ -263,15 +282,43 @@ async fn handle_incoming(
 ) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
 
-    // Reject if session already active
+    let session_gate = match state.session_gate.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            let (_, mut writer) = split(tunnel);
+            let err_frame = serde_json::to_vec(&ProtocolError {
+                t: "err".into(),
+                code: "session_busy".into(),
+                msg: "peer is already establishing a session".into(),
+            })
+            .unwrap_or_default();
+            let _ = write_framed(&mut writer, &err_frame).await;
+            log::info!("rejected incoming connection from {}: session establishment busy", peer_dest);
+            return Ok(());
+        }
+    };
+
+    // Reject if session already active — send explicit error to initiator
     if state.session.lock().await.is_some() {
+        let (_, mut writer) = split(tunnel);
+        let err_frame = serde_json::to_vec(&ProtocolError {
+            t: "err".into(),
+            code: "session_active".into(),
+            msg: "peer already has an active session".into(),
+        })
+        .unwrap_or_default();
+        let _ = write_framed(&mut writer, &err_frame).await;
+        log::info!("rejected incoming connection from {}: session already active", peer_dest);
         return Ok(());
     }
 
     let (mut reader, mut writer) = split(tunnel);
 
-    // Read HANDSHAKE_INIT
-    let frame = read_framed(&mut reader).await?;
+    // Read HANDSHAKE_INIT with timeout (60 seconds given I2P latency)
+    let frame = timeout(Duration::from_secs(60), read_framed(&mut reader))
+        .await
+        .map_err(|_| anyhow::anyhow!("handshake timeout: peer did not send INIT within 60s"))??;
+    
     let init: HandshakeInit = serde_json::from_slice(&frame)?;
     if init.t != "hi" {
         return Err(anyhow::anyhow!("expected handshake init, got type={}", init.t));
@@ -295,9 +342,11 @@ async fn handle_incoming(
     let ratchet = DoubleRatchet::from_root_key(&root_key, false);
     root_key.zeroize();
 
-    // Send HANDSHAKE_ACK
+    // Send HANDSHAKE_ACK with timeout (30 seconds - writing should be fast)
     let ack = serde_json::to_vec(&HandshakeAck { t: "ack".into() })?;
-    write_framed(&mut writer, &ack).await?;
+    timeout(Duration::from_secs(30), write_framed(&mut writer, &ack))
+        .await
+        .map_err(|_| anyhow::anyhow!("handshake timeout: failed to send ACK within 30s"))??;
 
     let peer_ik_bytes = <[u8; 32]>::try_from(ik_a_bytes.as_slice())?;
 
@@ -307,6 +356,8 @@ async fn handle_incoming(
         ratchet,
         stream_writer: writer,
         started_at: now_secs(),
+        send_seq: 0,
+        recv_seq: 0,
     });
 
     // Emit session established event
@@ -318,6 +369,7 @@ async fn handle_incoming(
         receive_loop(app_clone, reader).await;
     });
 
+    drop(session_gate);
     Ok(())
 }
 
@@ -355,6 +407,14 @@ pub async fn initiate_session(
     let spk_b_bytes = hex::decode(&peer.s).map_err(|e| e.to_string())?;
     if ik_b_bytes.len() != 32 || spk_b_bytes.len() != 32 {
         return Err("invalid key lengths in peer info".into());
+    }
+
+    let session_gate = state
+        .session_gate
+        .try_lock()
+        .map_err(|_| "session establishment already in progress".to_string())?;
+    if state.session.lock().await.is_some() {
+        return Err("session already active".into());
     }
 
     let ik_b_pub = PublicKey::from(<[u8; 32]>::try_from(ik_b_bytes.as_slice()).unwrap());
@@ -509,6 +569,17 @@ pub async fn initiate_session(
             read_framed(&mut reader)
         ).await {
             Ok(Ok(ack_frame)) => {
+                if let Ok(err) = serde_json::from_slice::<ProtocolError>(&ack_frame) {
+                    if err.t == "err" {
+                        let user_msg = match err.code.as_str() {
+                            "session_active" => "Peer already has an active session".to_string(),
+                            _ => format!("Peer rejected connection: {}", err.msg),
+                        };
+                        let _ = app.emit("connection_error", user_msg.clone());
+                        return Err(user_msg);
+                    }
+                }
+
                 let ack: HandshakeAck = serde_json::from_slice(&ack_frame).map_err(|e| e.to_string())?;
                 if ack.t != "ack" {
                     let error_msg = format!("Unexpected ack type (attempt {}/{}): {}", attempt, max_attempts, ack.t);
@@ -528,6 +599,8 @@ pub async fn initiate_session(
                     ratchet,
                     stream_writer: writer,
                     started_at: now_secs(),
+                    send_seq: 0,
+                    recv_seq: 0,
                 });
 
                 let _ = app.emit("session_established", serde_json::json!({ "peer_dest": peer_dest }));
@@ -537,6 +610,7 @@ pub async fn initiate_session(
                     receive_loop(app_clone, reader).await;
                 });
 
+                drop(session_gate);
                 return Ok(());
             },
             Ok(Err(e)) => {
@@ -572,19 +646,30 @@ pub async fn initiate_session(
 async fn receive_loop(app: AppHandle, mut reader: tokio::io::ReadHalf<tokio::net::TcpStream>) {
     loop {
         match read_framed(&mut reader).await {
-            Ok(frame) => {
-                if let Err(e) = handle_incoming_message(&app, &frame).await {
+            Ok(frame) => match handle_incoming_message(&app, &frame).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    let error_msg = format!("Decryption failed: {}", e);
+                    let _ = app.emit("decryption_error", error_msg);
+
+                    let state = app.state::<AppState>();
+                    *state.session.lock().await = None;
+                    state.received_message_ids.lock().await.clear();
+                    let _ = app.emit("session_closed", ());
+
                     #[cfg(debug_assertions)]
-                    log::warn!("message handling error: {}", e);
-                    let _ = e;
+                    log::warn!("decryption error - closing session: {}", e);
+                    break;
                 }
-            }
+            },
             Err(e) => {
                 #[cfg(debug_assertions)]
                 log::info!("peer stream closed: {}", e);
                 let _ = &e;
                 let state = app.state::<AppState>();
                 *state.session.lock().await = None;
+                state.received_message_ids.lock().await.clear();
                 let _ = app.emit("session_closed", ());
                 break;
             }
@@ -600,26 +685,85 @@ struct WireMessage {
     n: u32,
 }
 
-async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Result<()> {
+#[derive(Deserialize)]
+struct EncryptedMessage {
+    body: String,
+    seq: u64,
+    ts: u64,
+}
+
+/// Generic wire envelope used to inspect the `t` field before full deserialization.
+#[derive(Deserialize)]
+struct WireEnvelope {
+    t: String,
+}
+
+async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Result<bool> {
+    // Peek at the type field to handle control messages before attempting full parse
+    let envelope: WireEnvelope = serde_json::from_slice(frame)?;
+
+    // Handle session_end: peer is closing/wiping their session
+    if envelope.t == "end" {
+        let state = app.state::<AppState>();
+        *state.session.lock().await = None;
+        let _ = app.emit("session_closed", serde_json::json!({ "reason": "peer_ended" }));
+        return Ok(false);
+    }
+
     let wire: WireMessage = serde_json::from_slice(frame)?;
     if wire.t != "msg" {
-        return Ok(());
+        return Ok(true);
     }
+
+    let state = app.state::<AppState>();
+    
+    // Check for duplicate message to provide idempotency on network redelivery
+    let received_ids = state.received_message_ids.lock().await;
+    if received_ids.contains(&wire.id) {
+        // Duplicate message - skip silently
+        #[cfg(debug_assertions)]
+        log::debug!("duplicate message ignored: {}", wire.id);
+        drop(received_ids);
+        return Ok(true);
+    }
+    drop(received_ids);
 
     let ct = B64
         .decode(&wire.ct)
         .map_err(|e| anyhow::anyhow!("base64 decode: {}", e))?;
 
-    let state = app.state::<AppState>();
     let settings = state.settings.lock().await.clone();
 
     let plaintext_buf = {
         let mut sess = state.session.lock().await;
         let session = sess.as_mut().ok_or_else(|| anyhow::anyhow!("no session"))?;
-        session.ratchet.decrypt(&ct, wire.n)?
+        // Log decryption attempt with context for debugging
+        #[cfg(debug_assertions)]
+        log::debug!("attempting to decrypt message with counter={}", wire.n);
+        
+        session.ratchet.decrypt(&ct, wire.n)
+            .map_err(|e| anyhow::anyhow!("ratchet decrypt failed (counter={}): {}", wire.n, e))?
     };
 
-    let mut content = String::from_utf8(plaintext_buf.as_bytes().to_vec())?;
+    let expected_seq = {
+        let sess = state.session.lock().await;
+        sess.as_ref().map(|session| session.recv_seq).unwrap_or(0)
+    };
+    let mut payload: EncryptedMessage = serde_json::from_slice(plaintext_buf.as_bytes())?;
+    if payload.seq != expected_seq {
+        return Err(anyhow::anyhow!(
+            "message sequence mismatch: expected {}, got {}",
+            expected_seq,
+            payload.seq
+        ));
+    }
+    {
+        let mut sess = state.session.lock().await;
+        if let Some(session) = sess.as_mut() {
+            session.recv_seq = session.recv_seq.saturating_add(1);
+        }
+    }
+
     let now = now_secs();
     let expires_at = if settings.ttl_seconds > 0 {
         now + settings.ttl_seconds
@@ -629,19 +773,19 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
 
     let entry = MessageEntry {
         id: wire.id.clone(),
-        content: SecureBuffer::from_slice(content.as_bytes()),
+        content: SecureBuffer::from_slice(payload.body.as_bytes()),
         is_mine: false,
-        timestamp: now,
+        timestamp: payload.ts,
         expires_at,
     };
-    // Wipe plaintext intermediate — the content now lives only in SecureBuffer
-    unsafe { content.as_bytes_mut().zeroize(); }
+    unsafe { payload.body.as_bytes_mut().zeroize(); }
 
     let view = MessageView::from(&entry);
     state.messages.lock().await.push(entry);
+    state.received_message_ids.lock().await.insert(wire.id);
     let _ = app.emit("message_received", view);
 
-    Ok(())
+    Ok(true)
 }
 
 /// Close the active session, zeroizing all session key material.
@@ -649,10 +793,14 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
 pub async fn close_session(state: State<'_, AppState>) -> Result<(), String> {
     let mut sess = state.session.lock().await;
     if let Some(mut s) = sess.take() {
-        // Shut down write half to signal peer
+        // Notify peer that we are ending the session before shutting down
+        let end_msg = serde_json::to_vec(&SessionEnd { t: "end".into() }).unwrap_or_default();
+        let _ = write_framed(&mut s.stream_writer, &end_msg).await;
         let _ = s.stream_writer.shutdown().await;
     }
     state.messages.lock().await.clear();
+    // Clear message ID tracking so new session can receive same IDs
+    state.received_message_ids.lock().await.clear();
     Ok(())
 }
 
@@ -667,10 +815,14 @@ pub async fn do_panic_wipe(app: AppHandle) {
     {
         let mut sess = state.session.lock().await;
         if let Some(mut s) = sess.take() {
+            // Notify peer that session is ending before destroying everything
+            let end_msg = serde_json::to_vec(&SessionEnd { t: "end".into() }).unwrap_or_default();
+            let _ = write_framed(&mut s.stream_writer, &end_msg).await;
             let _ = s.stream_writer.shutdown().await;
         }
     }
     state.messages.lock().await.clear();
+    state.received_message_ids.lock().await.clear();
     *state.identity.lock().await = None;
     *state.i2p.lock().await = None;
 

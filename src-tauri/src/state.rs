@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashSet;
 use tokio::{
     io::WriteHalf,
     net::TcpStream,
@@ -53,6 +54,10 @@ pub struct ActiveSession {
     /// Write half of the active I2P tunnel stream.
     pub stream_writer: WriteHalf<TcpStream>,
     pub started_at: u64,
+    /// Monotonic send-side sequence number for message ordering.
+    pub send_seq: u64,
+    /// Expected next receive-side sequence number for ordering enforcement.
+    pub recv_seq: u64,
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -74,6 +79,7 @@ impl Default for AppSettings {
 pub struct AppState {
     pub identity: Mutex<Option<IdentityKeys>>,
     pub session: Mutex<Option<ActiveSession>>,
+    pub session_gate: Mutex<()>,
     pub messages: Mutex<Vec<MessageEntry>>,
     pub settings: Mutex<AppSettings>,
     pub i2p: Mutex<Option<I2pSession>>,
@@ -81,6 +87,8 @@ pub struct AppState {
     pub router_sam_port: Mutex<Option<u16>>,
     /// Last known router status — queried by frontend on mount to avoid event race on release.
     pub router_status: Mutex<String>,
+    /// Track message IDs we've already received to provide idempotency on network redelivery.
+    pub received_message_ids: Mutex<HashSet<String>>,
 }
 
 impl Default for AppState {
@@ -88,11 +96,13 @@ impl Default for AppState {
         Self {
             identity: Mutex::new(None),
             session: Mutex::new(None),
+            session_gate: Mutex::new(()),
             messages: Mutex::new(Vec::new()),
             settings: Mutex::new(AppSettings::default()),
             i2p: Mutex::new(None),
             router_sam_port: Mutex::new(None),
             router_status: Mutex::new("idle".to_string()),
+            received_message_ids: Mutex::new(HashSet::new()),
         }
     }
 }
