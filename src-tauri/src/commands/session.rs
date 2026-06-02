@@ -533,6 +533,7 @@ async fn receive_loop(app: AppHandle, mut reader: tokio::io::ReadHalf<tokio::net
                 let _ = &e;
                 let state = app.state::<AppState>();
                 *state.session.lock().await = None;
+                state.received_message_ids.lock().await.clear();
                 let _ = app.emit("session_closed", ());
                 break;
             }
@@ -578,11 +579,23 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
         return Ok(true);
     }
 
+    let state = app.state::<AppState>();
+    
+    // Check for duplicate message to provide idempotency on network redelivery
+    let received_ids = state.received_message_ids.lock().await;
+    if received_ids.contains(&wire.id) {
+        // Duplicate message - skip silently
+        #[cfg(debug_assertions)]
+        log::debug!("duplicate message ignored: {}", wire.id);
+        drop(received_ids);
+        return Ok(());
+    }
+    drop(received_ids);
+
     let ct = B64
         .decode(&wire.ct)
         .map_err(|e| anyhow::anyhow!("base64 decode: {}", e))?;
 
-    let state = app.state::<AppState>();
     let settings = state.settings.lock().await.clone();
 
     let plaintext_buf = {
@@ -633,6 +646,7 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
 
     let view = MessageView::from(&entry);
     state.messages.lock().await.push(entry);
+    state.received_message_ids.lock().await.insert(wire.id);
     let _ = app.emit("message_received", view);
 
     Ok(true)
@@ -649,6 +663,8 @@ pub async fn close_session(state: State<'_, AppState>) -> Result<(), String> {
         let _ = s.stream_writer.shutdown().await;
     }
     state.messages.lock().await.clear();
+    // Clear message ID tracking so new session can receive same IDs
+    state.received_message_ids.lock().await.clear();
     Ok(())
 }
 
@@ -670,6 +686,7 @@ pub async fn do_panic_wipe(app: AppHandle) {
         }
     }
     state.messages.lock().await.clear();
+    state.received_message_ids.lock().await.clear();
     *state.identity.lock().await = None;
     *state.i2p.lock().await = None;
 
