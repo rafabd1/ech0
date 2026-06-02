@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use base64::{
     engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD},
@@ -7,6 +10,7 @@ use base64::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{split, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use x25519_dalek::{PublicKey, StaticSecret};
 use rand::rngs::OsRng;
 use zeroize::Zeroize;
@@ -191,6 +195,8 @@ fn build_connect_link(dest: &str, ik_hex: &str, spk_hex: &str) -> String {
 /// Accept loop: waits for incoming I2P stream connections for this session.
 /// Implements non-blocking handshakes with timeout and tunnel health monitoring.
 async fn accept_loop(app: AppHandle, session_id: String, sam_addr: String) {
+    let handshake_limit = Arc::new(Semaphore::new(3));
+
     // Spawn health monitoring task
     let app_health = app.clone();
     let session_id_health = session_id.clone();
@@ -212,9 +218,18 @@ async fn accept_loop(app: AppHandle, session_id: String, sam_addr: String) {
 
         match accept_once_raw(&session_id, &sam_addr).await {
             Ok((peer_dest, tunnel)) => {
+                let permit = match handshake_limit.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let _ = app.emit("connection_error", "Too many incoming handshakes");
+                        drop(tunnel);
+                        continue;
+                    }
+                };
                 // Spawn handshake in a separate task with timeout to avoid blocking
                 let app_clone = app.clone();
                 tauri::async_runtime::spawn(async move {
+                    let _permit = permit;
                     // 60s timeout for handshake to prevent indefinite blocking
                     let result = tokio::time::timeout(
                         tokio::time::Duration::from_secs(60),
@@ -265,10 +280,14 @@ async fn tunnel_health_monitor(app: AppHandle, session_id: String, sam_addr: Str
         let is_healthy = check_tunnel_health(&sam_addr).await;
         
         if is_healthy {
+            *app.state::<AppState>().router_status.lock().await = "ready".to_string();
+            let _ = app.emit("router_status_changed", "ready");
             let _ = app.emit("tunnel_healthy", ());
         } else {
             #[cfg(debug_assertions)]
             log::warn!("Tunnel health check failed");
+            *app.state::<AppState>().router_status.lock().await = "degraded".to_string();
+            let _ = app.emit("router_status_changed", "degraded");
             let _ = app.emit("tunnel_degraded", ());
         }
 
@@ -280,18 +299,16 @@ async fn tunnel_health_monitor(app: AppHandle, session_id: String, sam_addr: Str
 /// Quick health check for the I2P tunnel.
 /// Attempts to connect to SAM and verify session is still valid.
 async fn check_tunnel_health(sam_addr: &str) -> bool {
-    match tokio::net::TcpStream::connect(sam_addr).await {
-        Ok(mut stream) => {
-            use tokio::io::AsyncWriteExt;
-            if stream.write_all(b"HELLO VERSION MIN=3.1 MAX=3.3\n").await.is_ok() {
-                // If we can connect and send HELLO, tunnel is healthy
-                true
-            } else {
-                false
-            }
-        }
-        Err(_) => false,
-    }
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        let mut stream = tokio::net::TcpStream::connect(sam_addr).await?;
+        stream.write_all(b"HELLO VERSION MIN=3.1 MAX=3.3\n").await?;
+        let reply = read_sam_line_raw(&mut stream).await?;
+        anyhow::Ok(reply.contains("RESULT=OK"))
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or(false)
 }
 
 async fn accept_once_raw(

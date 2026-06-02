@@ -12,7 +12,7 @@ export default function SessionSetup({ onInitiateSession }: SessionSetupProps) {
   const [copied, setCopied] = useState(false);
   const [tab, setTab] = useState<"show" | "connect">("show");
 
-  const isReady = state.routerStatus === "ready";
+  const isReady = state.routerStatus === "ready" || state.routerStatus === "degraded";
   const isLoading =
     state.routerStatus === "bootstrapping" || state.routerStatus === "connecting";
 
@@ -79,6 +79,12 @@ export default function SessionSetup({ onInitiateSession }: SessionSetupProps) {
             {state.routerStatus === "error" && (
               <p className="text-[11px] font-mono text-muted text-center">
                 i2p router error — check logs
+              </p>
+            )}
+
+            {state.routerStatus === "degraded" && (
+              <p className="text-[11px] font-mono text-muted text-center">
+                i2p tunnel degraded
               </p>
             )}
 
