@@ -41,6 +41,11 @@ struct HandshakeAck {
     t: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SessionEnd {
+    t: String,
+}
+
 #[derive(Serialize)]
 pub struct IdentityInfo {
     pub b32_addr: String,
@@ -438,13 +443,15 @@ pub async fn initiate_session(
 async fn receive_loop(app: AppHandle, mut reader: tokio::io::ReadHalf<tokio::net::TcpStream>) {
     loop {
         match read_framed(&mut reader).await {
-            Ok(frame) => {
-                if let Err(e) = handle_incoming_message(&app, &frame).await {
+            Ok(frame) => match handle_incoming_message(&app, &frame).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
                     #[cfg(debug_assertions)]
                     log::warn!("message handling error: {}", e);
                     let _ = e;
                 }
-            }
+            },
             Err(e) => {
                 #[cfg(debug_assertions)]
                 log::info!("peer stream closed: {}", e);
@@ -473,10 +480,27 @@ struct EncryptedMessage {
     ts: u64,
 }
 
-async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Result<()> {
+/// Generic wire envelope used to inspect the `t` field before full deserialization.
+#[derive(Deserialize)]
+struct WireEnvelope {
+    t: String,
+}
+
+async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Result<bool> {
+    // Peek at the type field to handle control messages before attempting full parse
+    let envelope: WireEnvelope = serde_json::from_slice(frame)?;
+
+    // Handle session_end: peer is closing/wiping their session
+    if envelope.t == "end" {
+        let state = app.state::<AppState>();
+        *state.session.lock().await = None;
+        let _ = app.emit("session_closed", serde_json::json!({ "reason": "peer_ended" }));
+        return Ok(false);
+    }
+
     let wire: WireMessage = serde_json::from_slice(frame)?;
     if wire.t != "msg" {
-        return Ok(());
+        return Ok(true);
     }
 
     let ct = B64
@@ -531,7 +555,7 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
     state.messages.lock().await.push(entry);
     let _ = app.emit("message_received", view);
 
-    Ok(())
+    Ok(true)
 }
 
 /// Close the active session, zeroizing all session key material.
@@ -539,7 +563,9 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
 pub async fn close_session(state: State<'_, AppState>) -> Result<(), String> {
     let mut sess = state.session.lock().await;
     if let Some(mut s) = sess.take() {
-        // Shut down write half to signal peer
+        // Notify peer that we are ending the session before shutting down
+        let end_msg = serde_json::to_vec(&SessionEnd { t: "end".into() }).unwrap_or_default();
+        let _ = write_framed(&mut s.stream_writer, &end_msg).await;
         let _ = s.stream_writer.shutdown().await;
     }
     state.messages.lock().await.clear();
@@ -557,6 +583,9 @@ pub async fn do_panic_wipe(app: AppHandle) {
     {
         let mut sess = state.session.lock().await;
         if let Some(mut s) = sess.take() {
+            // Notify peer that session is ending before destroying everything
+            let end_msg = serde_json::to_vec(&SessionEnd { t: "end".into() }).unwrap_or_default();
+            let _ = write_framed(&mut s.stream_writer, &end_msg).await;
             let _ = s.stream_writer.shutdown().await;
         }
     }
