@@ -22,9 +22,12 @@ struct WireMessage<'a> {
     id: &'a str,
     ct: String,
     n: u32,
-    /// Sender-side sequence number for ordering enforcement
+}
+
+#[derive(Serialize)]
+struct EncryptedMessage<'a> {
+    body: &'a str,
     seq: u64,
-    /// Sender-side unix timestamp (seconds) for cross-peer consistency
     ts: u64,
 }
 
@@ -42,16 +45,22 @@ pub async fn send_message(
     let id = uuid::Uuid::new_v4().to_string();
     let now = now_secs();
 
-    let (ct, counter, seq) = {
+    let (ct, counter) = {
         let mut sess = state.session.lock().await;
         let session = sess.as_mut().ok_or("no active session")?;
+        let seq = session.send_seq;
+        let payload = serde_json::to_vec(&EncryptedMessage {
+            body: &content,
+            seq,
+            ts: now,
+        })
+        .map_err(|e| e.to_string())?;
         let (ct, counter) = session
             .ratchet
-            .encrypt(content.as_bytes())
+            .encrypt(&payload)
             .map_err(|e| e.to_string())?;
-        let seq = session.send_seq;
         session.send_seq += 1;
-        (ct, counter, seq)
+        (ct, counter)
     };
 
     let wire = serde_json::to_vec(&WireMessage {
@@ -59,8 +68,6 @@ pub async fn send_message(
         id: &id,
         ct: B64.encode(&ct),
         n: counter,
-        seq,
-        ts: now,
     })
     .map_err(|e| e.to_string())?;
 

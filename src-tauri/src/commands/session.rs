@@ -464,11 +464,12 @@ struct WireMessage {
     id: String,
     ct: String,
     n: u32,
-    /// Sender-side sequence number for ordering enforcement
-    #[serde(default)]
+}
+
+#[derive(Deserialize)]
+struct EncryptedMessage {
+    body: String,
     seq: u64,
-    /// Sender-side unix timestamp (seconds)
-    #[serde(default)]
     ts: u64,
 }
 
@@ -488,25 +489,28 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
     let plaintext_buf = {
         let mut sess = state.session.lock().await;
         let session = sess.as_mut().ok_or_else(|| anyhow::anyhow!("no session"))?;
-
-        // Enforce message ordering via sender sequence number
-        if wire.seq != session.recv_seq {
-            log::warn!(
-                "out-of-order message: expected seq={}, got seq={}",
-                session.recv_seq,
-                wire.seq
-            );
-            // Still process but warn — I2P may reorder occasionally
-        }
-        // Advance expected sequence to the maximum seen + 1
-        if wire.seq >= session.recv_seq {
-            session.recv_seq = wire.seq + 1;
-        }
-
         session.ratchet.decrypt(&ct, wire.n)?
     };
 
-    let mut content = String::from_utf8(plaintext_buf.as_bytes().to_vec())?;
+    let expected_seq = {
+        let sess = state.session.lock().await;
+        sess.as_ref().map(|session| session.recv_seq).unwrap_or(0)
+    };
+    let mut payload: EncryptedMessage = serde_json::from_slice(plaintext_buf.as_bytes())?;
+    if payload.seq != expected_seq {
+        return Err(anyhow::anyhow!(
+            "message sequence mismatch: expected {}, got {}",
+            expected_seq,
+            payload.seq
+        ));
+    }
+    {
+        let mut sess = state.session.lock().await;
+        if let Some(session) = sess.as_mut() {
+            session.recv_seq = session.recv_seq.saturating_add(1);
+        }
+    }
+
     let now = now_secs();
     let expires_at = if settings.ttl_seconds > 0 {
         now + settings.ttl_seconds
@@ -514,18 +518,14 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
         0
     };
 
-    // Use sender timestamp if provided, fall back to local time
-    let msg_timestamp = if wire.ts > 0 { wire.ts } else { now };
-
     let entry = MessageEntry {
         id: wire.id.clone(),
-        content: SecureBuffer::from_slice(content.as_bytes()),
+        content: SecureBuffer::from_slice(payload.body.as_bytes()),
         is_mine: false,
-        timestamp: msg_timestamp,
+        timestamp: payload.ts,
         expires_at,
     };
-    // Wipe plaintext intermediate — the content now lives only in SecureBuffer
-    unsafe { content.as_bytes_mut().zeroize(); }
+    unsafe { payload.body.as_bytes_mut().zeroize(); }
 
     let view = MessageView::from(&entry);
     state.messages.lock().await.push(entry);
