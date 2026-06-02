@@ -447,6 +447,7 @@ async fn receive_loop(app: AppHandle, mut reader: tokio::io::ReadHalf<tokio::net
                 let _ = &e;
                 let state = app.state::<AppState>();
                 *state.session.lock().await = None;
+                state.received_message_ids.lock().await.clear();
                 let _ = app.emit("session_closed", ());
                 break;
             }
@@ -471,7 +472,7 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
     let state = app.state::<AppState>();
     
     // Check for duplicate message to provide idempotency on network redelivery
-    let mut received_ids = state.received_message_ids.lock().await;
+    let received_ids = state.received_message_ids.lock().await;
     if received_ids.contains(&wire.id) {
         // Duplicate message - skip silently
         #[cfg(debug_assertions)]
@@ -479,7 +480,6 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
         drop(received_ids);
         return Ok(());
     }
-    received_ids.insert(wire.id.clone());
     drop(received_ids);
 
     let ct = B64
@@ -514,6 +514,7 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
 
     let view = MessageView::from(&entry);
     state.messages.lock().await.push(entry);
+    state.received_message_ids.lock().await.insert(wire.id);
     let _ = app.emit("message_received", view);
 
     Ok(())
@@ -548,6 +549,7 @@ pub async fn do_panic_wipe(app: AppHandle) {
         }
     }
     state.messages.lock().await.clear();
+    state.received_message_ids.lock().await.clear();
     *state.identity.lock().await = None;
     *state.i2p.lock().await = None;
 
