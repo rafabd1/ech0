@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{split, AsyncWriteExt};
 use tokio::sync::Semaphore;
+use tokio::time::{timeout, Duration};
 use x25519_dalek::{PublicKey, StaticSecret};
 use rand::rngs::OsRng;
 use zeroize::Zeroize;
@@ -42,6 +43,19 @@ struct HandshakeInit {
 
 #[derive(Serialize, Deserialize)]
 struct HandshakeAck {
+    t: String,
+}
+
+/// Protocol error sent when a handshake is rejected (e.g. session already active).
+#[derive(Serialize, Deserialize)]
+struct ProtocolError {
+    t: String,
+    code: String,
+    msg: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SessionEnd {
     t: String,
 }
 
@@ -241,6 +255,8 @@ async fn accept_loop(app: AppHandle, session_id: String, sam_addr: String) {
                             // Handshake successful
                         },
                         Ok(Err(e)) => {
+                            let error_msg = format!("Connection failed: {}", e);
+                            let _ = app_clone.emit("connection_error", error_msg);
                             #[cfg(debug_assertions)]
                             log::warn!("incoming session handshake error: {}", e);
                             let _ = e;
@@ -349,6 +365,7 @@ async fn read_sam_line_raw(stream: &mut tokio::net::TcpStream) -> anyhow::Result
 }
 
 /// Handle an incoming I2P connection: read handshake, compute X3DH, set session.
+/// All I/O operations are wrapped in timeouts to prevent indefinite hangs on degraded I2P tunnels.
 async fn handle_incoming(
     app: &AppHandle,
     peer_dest: String,
@@ -356,15 +373,43 @@ async fn handle_incoming(
 ) -> anyhow::Result<()> {
     let state = app.state::<AppState>();
 
-    // Reject if session already active
+    let session_gate = match state.session_gate.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            let (_, mut writer) = split(tunnel);
+            let err_frame = serde_json::to_vec(&ProtocolError {
+                t: "err".into(),
+                code: "session_busy".into(),
+                msg: "peer is already establishing a session".into(),
+            })
+            .unwrap_or_default();
+            let _ = write_framed(&mut writer, &err_frame).await;
+            log::info!("rejected incoming connection from {}: session establishment busy", peer_dest);
+            return Ok(());
+        }
+    };
+
+    // Reject if session already active — send explicit error to initiator
     if state.session.lock().await.is_some() {
+        let (_, mut writer) = split(tunnel);
+        let err_frame = serde_json::to_vec(&ProtocolError {
+            t: "err".into(),
+            code: "session_active".into(),
+            msg: "peer already has an active session".into(),
+        })
+        .unwrap_or_default();
+        let _ = write_framed(&mut writer, &err_frame).await;
+        log::info!("rejected incoming connection from {}: session already active", peer_dest);
         return Ok(());
     }
 
     let (mut reader, mut writer) = split(tunnel);
 
-    // Read HANDSHAKE_INIT
-    let frame = read_framed(&mut reader).await?;
+    // Read HANDSHAKE_INIT with timeout (60 seconds given I2P latency)
+    let frame = timeout(Duration::from_secs(60), read_framed(&mut reader))
+        .await
+        .map_err(|_| anyhow::anyhow!("handshake timeout: peer did not send INIT within 60s"))??;
+    
     let init: HandshakeInit = serde_json::from_slice(&frame)?;
     if init.t != "hi" {
         return Err(anyhow::anyhow!("expected handshake init, got type={}", init.t));
@@ -388,9 +433,11 @@ async fn handle_incoming(
     let ratchet = DoubleRatchet::from_root_key(&root_key, false);
     root_key.zeroize();
 
-    // Send HANDSHAKE_ACK
+    // Send HANDSHAKE_ACK with timeout (30 seconds - writing should be fast)
     let ack = serde_json::to_vec(&HandshakeAck { t: "ack".into() })?;
-    write_framed(&mut writer, &ack).await?;
+    timeout(Duration::from_secs(30), write_framed(&mut writer, &ack))
+        .await
+        .map_err(|_| anyhow::anyhow!("handshake timeout: failed to send ACK within 30s"))??;
 
     let peer_ik_bytes = <[u8; 32]>::try_from(ik_a_bytes.as_slice())?;
 
@@ -400,6 +447,8 @@ async fn handle_incoming(
         ratchet,
         stream_writer: writer,
         started_at: now_secs(),
+        send_seq: 0,
+        recv_seq: 0,
     });
 
     // Emit session established event
@@ -411,10 +460,12 @@ async fn handle_incoming(
         receive_loop(app_clone, reader).await;
     });
 
+    drop(session_gate);
     Ok(())
 }
 
 /// Initiate a session by pasting peer's ech0:// link or raw JSON payload.
+/// Implements retry with exponential backoff and progress feedback.
 #[tauri::command]
 pub async fn initiate_session(
     state: State<'_, AppState>,
@@ -449,97 +500,267 @@ pub async fn initiate_session(
         return Err("invalid key lengths in peer info".into());
     }
 
+    let session_gate = state
+        .session_gate
+        .try_lock()
+        .map_err(|_| "session establishment already in progress".to_string())?;
+    if state.session.lock().await.is_some() {
+        return Err("session already active".into());
+    }
+
     let ik_b_pub = PublicKey::from(<[u8; 32]>::try_from(ik_b_bytes.as_slice()).unwrap());
     let spk_b_pub = PublicKey::from(<[u8; 32]>::try_from(spk_b_bytes.as_slice()).unwrap());
 
-    // Generate ephemeral key and compute X3DH
-    let ek_a = StaticSecret::random_from_rng(OsRng);
-    let ek_a_pub = PublicKey::from(&ek_a);
+    let peer_dest = peer.dest.clone();
+    
+    // Retry loop with exponential backoff (max 5 attempts)
+    let max_attempts = 5u32;
+    let mut attempt = 0u32;
+    
+    while attempt < max_attempts {
+        attempt += 1;
+        
+        // Emit progress event
+        let _ = app.emit(
+            "connection_progress",
+            serde_json::json!({
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "status": "connecting"
+            })
+        );
+        
+        // Generate ephemeral key and compute X3DH for each attempt
+        let ek_a = StaticSecret::random_from_rng(OsRng);
+        let ek_a_pub = PublicKey::from(&ek_a);
 
-    let mut root_key = {
-        let id = state.identity.lock().await;
-        let keys = id.as_ref().ok_or("no identity generated")?;
-        x3dh_initiator(&keys.ik_secret, &ek_a, &ik_b_pub, &spk_b_pub)
-    };
+        let mut root_key = {
+            let id = state.identity.lock().await;
+            let keys = id.as_ref().ok_or("no identity generated")?;
+            x3dh_initiator(&keys.ik_secret, &ek_a, &ik_b_pub, &spk_b_pub)
+        };
 
-    let ratchet = DoubleRatchet::from_root_key(&root_key, true);
-    root_key.zeroize();
+        let ratchet = DoubleRatchet::from_root_key(&root_key, true);
+        root_key.zeroize();
 
-    // Dial peer
-    let tunnel = {
-        let i2p = state.i2p.lock().await;
-        let session = i2p.as_ref().ok_or("i2p not connected")?;
-        session
-            .connect_to_peer(&peer.dest)
+        // Dial peer
+        let tunnel = {
+            let i2p = state.i2p.lock().await;
+            let session = i2p.as_ref().ok_or("i2p not connected")?;
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(60),
+                session.connect_to_peer(&peer.dest),
+            )
             .await
-            .map_err(|e| e.to_string())?
-    };
+            {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
+                    let error_msg = format!("Connection failed (attempt {}/{}): {}", attempt, max_attempts, e);
+                    let _ = app.emit("connection_error", error_msg);
+                    
+                    if attempt < max_attempts {
+                        // Exponential backoff: 2s, 4s, 8s, 16s
+                        let backoff_secs = 2u64.pow(attempt.min(4));
+                        let _ = app.emit(
+                            "connection_progress",
+                            serde_json::json!({
+                                "attempt": attempt,
+                                "max_attempts": max_attempts,
+                                "status": "retrying"
+                            })
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    let error_msg = format!("Connection timeout (attempt {}/{}) - peer did not respond within 60s", attempt, max_attempts);
+                    let _ = app.emit("connection_error", error_msg);
 
-    let (mut reader, mut writer) = split(tunnel);
+                    if attempt < max_attempts {
+                        let backoff_secs = 2u64.pow(attempt.min(4));
+                        let _ = app.emit(
+                            "connection_progress",
+                            serde_json::json!({
+                                "attempt": attempt,
+                                "max_attempts": max_attempts,
+                                "status": "retrying"
+                            })
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    }
+                    continue;
+                }
+            }
+        };
 
-    // Send HANDSHAKE_INIT
-    let ik_hex = {
-        let id = state.identity.lock().await;
-        id.as_ref().unwrap().ik_pub_hex()
-    };
+        let (mut reader, mut writer) = split(tunnel);
 
-    let init_msg = serde_json::to_vec(&HandshakeInit {
-        t: "hi".into(),
-        ik: ik_hex,
-        ek: hex::encode(ek_a_pub.as_bytes()),
-    })
-    .map_err(|e| e.to_string())?;
+        // Send HANDSHAKE_INIT
+        let ik_hex = {
+            let id = state.identity.lock().await;
+            id.as_ref().unwrap().ik_pub_hex()
+        };
 
-    write_framed(&mut writer, &init_msg)
-        .await
+        let init_msg = serde_json::to_vec(&HandshakeInit {
+            t: "hi".into(),
+            ik: ik_hex,
+            ek: hex::encode(ek_a_pub.as_bytes()),
+        })
         .map_err(|e| e.to_string())?;
 
-    // Wait for ACK
-    let ack_frame = read_framed(&mut reader)
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(30),
+            write_framed(&mut writer, &init_msg),
+        )
         .await
-        .map_err(|e| e.to_string())?;
-    let ack: HandshakeAck = serde_json::from_slice(&ack_frame).map_err(|e| e.to_string())?;
-    if ack.t != "ack" {
-        return Err(format!("unexpected ack type: {}", ack.t));
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let error_msg = format!("Handshake send failed (attempt {}/{}): {}", attempt, max_attempts, e);
+                let _ = app.emit("connection_error", error_msg);
+
+                if attempt < max_attempts {
+                    let backoff_secs = 2u64.pow(attempt.min(4));
+                    let _ = app.emit(
+                        "connection_progress",
+                        serde_json::json!({
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "status": "retrying"
+                        })
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                }
+                continue;
+            }
+            Err(_) => {
+                let error_msg = format!("Handshake send timeout (attempt {}/{})", attempt, max_attempts);
+                let _ = app.emit("connection_error", error_msg);
+
+                if attempt < max_attempts {
+                    let backoff_secs = 2u64.pow(attempt.min(4));
+                    let _ = app.emit(
+                        "connection_progress",
+                        serde_json::json!({
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "status": "retrying"
+                        })
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                }
+                continue;
+            }
+        }
+
+        // Wait for ACK with timeout
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(60),
+            read_framed(&mut reader)
+        ).await {
+            Ok(Ok(ack_frame)) => {
+                if let Ok(err) = serde_json::from_slice::<ProtocolError>(&ack_frame) {
+                    if err.t == "err" {
+                        let user_msg = match err.code.as_str() {
+                            "session_active" => "Peer already has an active session".to_string(),
+                            _ => format!("Peer rejected connection: {}", err.msg),
+                        };
+                        let _ = app.emit("connection_error", user_msg.clone());
+                        return Err(user_msg);
+                    }
+                }
+
+                let ack: HandshakeAck = serde_json::from_slice(&ack_frame).map_err(|e| e.to_string())?;
+                if ack.t != "ack" {
+                    let error_msg = format!("Unexpected ack type (attempt {}/{}): {}", attempt, max_attempts, ack.t);
+                    let _ = app.emit("connection_error", error_msg);
+                    
+                    if attempt < max_attempts {
+                        let backoff_secs = 2u64.pow(attempt.min(4));
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    }
+                    continue;
+                }
+                
+                // Handshake successful - establish session
+                *state.session.lock().await = Some(ActiveSession {
+                    peer_dest: peer_dest.clone(),
+                    peer_ik_bytes: <[u8; 32]>::try_from(ik_b_bytes.as_slice()).unwrap(),
+                    ratchet,
+                    stream_writer: writer,
+                    started_at: now_secs(),
+                    send_seq: 0,
+                    recv_seq: 0,
+                });
+
+                let _ = app.emit("session_established", serde_json::json!({ "peer_dest": peer_dest }));
+
+                let app_clone = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    receive_loop(app_clone, reader).await;
+                });
+
+                drop(session_gate);
+                return Ok(());
+            },
+            Ok(Err(e)) => {
+                let error_msg = format!("Handshake receive failed (attempt {}/{}): {}", attempt, max_attempts, e);
+                let _ = app.emit("connection_error", error_msg);
+                
+                if attempt < max_attempts {
+                    let backoff_secs = 2u64.pow(attempt.min(4));
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                }
+                continue;
+            },
+            Err(_) => {
+                let error_msg = format!("Handshake timeout (attempt {}/{}) - peer did not respond within 60s", attempt, max_attempts);
+                let _ = app.emit("connection_error", error_msg);
+                
+                if attempt < max_attempts {
+                    let backoff_secs = 2u64.pow(attempt.min(4));
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                }
+                continue;
+            }
+        }
     }
 
-    let peer_dest = peer.dest.clone();
-
-    *state.session.lock().await = Some(ActiveSession {
-        peer_dest: peer_dest.clone(),
-        peer_ik_bytes: <[u8; 32]>::try_from(ik_b_bytes.as_slice()).unwrap(),
-        ratchet,
-        stream_writer: writer,
-        started_at: now_secs(),
-    });
-
-    let _ = app.emit("session_established", serde_json::json!({ "peer_dest": peer_dest }));
-
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn(async move {
-        receive_loop(app_clone, reader).await;
-    });
-
-    Ok(())
+    // All attempts failed
+    let final_error = format!("Connection failed after {} attempts. Peer may be offline or I2P tunnel degraded.", max_attempts);
+    let _ = app.emit("connection_error", final_error.clone());
+    Err(final_error)
 }
 
 /// Background task: receive encrypted messages from the peer.
 async fn receive_loop(app: AppHandle, mut reader: tokio::io::ReadHalf<tokio::net::TcpStream>) {
     loop {
         match read_framed(&mut reader).await {
-            Ok(frame) => {
-                if let Err(e) = handle_incoming_message(&app, &frame).await {
+            Ok(frame) => match handle_incoming_message(&app, &frame).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    let error_msg = format!("Decryption failed: {}", e);
+                    let _ = app.emit("decryption_error", error_msg);
+
+                    let state = app.state::<AppState>();
+                    *state.session.lock().await = None;
+                    state.received_message_ids.lock().await.clear();
+                    let _ = app.emit("session_closed", ());
+
                     #[cfg(debug_assertions)]
-                    log::warn!("message handling error: {}", e);
-                    let _ = e;
+                    log::warn!("decryption error - closing session: {}", e);
+                    break;
                 }
-            }
+            },
             Err(e) => {
                 #[cfg(debug_assertions)]
                 log::info!("peer stream closed: {}", e);
                 let _ = &e;
                 let state = app.state::<AppState>();
                 *state.session.lock().await = None;
+                state.received_message_ids.lock().await.clear();
                 let _ = app.emit("session_closed", ());
                 break;
             }
@@ -555,26 +776,85 @@ struct WireMessage {
     n: u32,
 }
 
-async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Result<()> {
+#[derive(Deserialize)]
+struct EncryptedMessage {
+    body: String,
+    seq: u64,
+    ts: u64,
+}
+
+/// Generic wire envelope used to inspect the `t` field before full deserialization.
+#[derive(Deserialize)]
+struct WireEnvelope {
+    t: String,
+}
+
+async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Result<bool> {
+    // Peek at the type field to handle control messages before attempting full parse
+    let envelope: WireEnvelope = serde_json::from_slice(frame)?;
+
+    // Handle session_end: peer is closing/wiping their session
+    if envelope.t == "end" {
+        let state = app.state::<AppState>();
+        *state.session.lock().await = None;
+        let _ = app.emit("session_closed", serde_json::json!({ "reason": "peer_ended" }));
+        return Ok(false);
+    }
+
     let wire: WireMessage = serde_json::from_slice(frame)?;
     if wire.t != "msg" {
-        return Ok(());
+        return Ok(true);
     }
+
+    let state = app.state::<AppState>();
+    
+    // Check for duplicate message to provide idempotency on network redelivery
+    let received_ids = state.received_message_ids.lock().await;
+    if received_ids.contains(&wire.id) {
+        // Duplicate message - skip silently
+        #[cfg(debug_assertions)]
+        log::debug!("duplicate message ignored: {}", wire.id);
+        drop(received_ids);
+        return Ok(true);
+    }
+    drop(received_ids);
 
     let ct = B64
         .decode(&wire.ct)
         .map_err(|e| anyhow::anyhow!("base64 decode: {}", e))?;
 
-    let state = app.state::<AppState>();
     let settings = state.settings.lock().await.clone();
 
     let plaintext_buf = {
         let mut sess = state.session.lock().await;
         let session = sess.as_mut().ok_or_else(|| anyhow::anyhow!("no session"))?;
-        session.ratchet.decrypt(&ct, wire.n)?
+        // Log decryption attempt with context for debugging
+        #[cfg(debug_assertions)]
+        log::debug!("attempting to decrypt message with counter={}", wire.n);
+        
+        session.ratchet.decrypt(&ct, wire.n)
+            .map_err(|e| anyhow::anyhow!("ratchet decrypt failed (counter={}): {}", wire.n, e))?
     };
 
-    let mut content = String::from_utf8(plaintext_buf.as_bytes().to_vec())?;
+    let expected_seq = {
+        let sess = state.session.lock().await;
+        sess.as_ref().map(|session| session.recv_seq).unwrap_or(0)
+    };
+    let mut payload: EncryptedMessage = serde_json::from_slice(plaintext_buf.as_bytes())?;
+    if payload.seq != expected_seq {
+        return Err(anyhow::anyhow!(
+            "message sequence mismatch: expected {}, got {}",
+            expected_seq,
+            payload.seq
+        ));
+    }
+    {
+        let mut sess = state.session.lock().await;
+        if let Some(session) = sess.as_mut() {
+            session.recv_seq = session.recv_seq.saturating_add(1);
+        }
+    }
+
     let now = now_secs();
     let expires_at = if settings.ttl_seconds > 0 {
         now + settings.ttl_seconds
@@ -584,19 +864,19 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
 
     let entry = MessageEntry {
         id: wire.id.clone(),
-        content: SecureBuffer::from_slice(content.as_bytes()),
+        content: SecureBuffer::from_slice(payload.body.as_bytes()),
         is_mine: false,
-        timestamp: now,
+        timestamp: payload.ts,
         expires_at,
     };
-    // Wipe plaintext intermediate — the content now lives only in SecureBuffer
-    unsafe { content.as_bytes_mut().zeroize(); }
+    unsafe { payload.body.as_bytes_mut().zeroize(); }
 
     let view = MessageView::from(&entry);
     state.messages.lock().await.push(entry);
+    state.received_message_ids.lock().await.insert(wire.id);
     let _ = app.emit("message_received", view);
 
-    Ok(())
+    Ok(true)
 }
 
 /// Close the active session, zeroizing all session key material.
@@ -604,10 +884,14 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
 pub async fn close_session(state: State<'_, AppState>) -> Result<(), String> {
     let mut sess = state.session.lock().await;
     if let Some(mut s) = sess.take() {
-        // Shut down write half to signal peer
+        // Notify peer that we are ending the session before shutting down
+        let end_msg = serde_json::to_vec(&SessionEnd { t: "end".into() }).unwrap_or_default();
+        let _ = write_framed(&mut s.stream_writer, &end_msg).await;
         let _ = s.stream_writer.shutdown().await;
     }
     state.messages.lock().await.clear();
+    // Clear message ID tracking so new session can receive same IDs
+    state.received_message_ids.lock().await.clear();
     Ok(())
 }
 
@@ -622,10 +906,14 @@ pub async fn do_panic_wipe(app: AppHandle) {
     {
         let mut sess = state.session.lock().await;
         if let Some(mut s) = sess.take() {
+            // Notify peer that session is ending before destroying everything
+            let end_msg = serde_json::to_vec(&SessionEnd { t: "end".into() }).unwrap_or_default();
+            let _ = write_framed(&mut s.stream_writer, &end_msg).await;
             let _ = s.stream_writer.shutdown().await;
         }
     }
     state.messages.lock().await.clear();
+    state.received_message_ids.lock().await.clear();
     *state.identity.lock().await = None;
     *state.i2p.lock().await = None;
 

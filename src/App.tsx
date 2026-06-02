@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { StoreContext, createStoreReducer } from "./store/sessionStore";
-import type { IdentityInfo, MessageView, RouterStatus, TtlOption } from "./types";
+import type { ConnectionProgress, IdentityInfo, MessageView, RouterStatus, TtlOption } from "./types";
 import Header from "./components/Header";
 import ChatWindow from "./components/ChatWindow";
 import MessageInput from "./components/MessageInput";
@@ -37,6 +37,14 @@ export default function App() {
 
     listen<string>("router_status_changed", (e) => {
       dispatch({ type: "SET_ROUTER_STATUS", payload: e.payload as RouterStatus });
+    }).then((u) => unlisten.push(u));
+
+    listen<ConnectionProgress>("connection_progress", (e) => {
+      dispatch({ type: "SET_CONNECTION_PROGRESS", payload: e.payload });
+    }).then((u) => unlisten.push(u));
+
+    listen<string>("connection_error", (e) => {
+      dispatch({ type: "SET_ERROR", payload: e.payload });
     }).then((u) => unlisten.push(u));
 
     listen<{ peer_dest: string }>("session_established", (e) => {
