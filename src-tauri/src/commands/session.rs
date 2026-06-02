@@ -439,17 +439,15 @@ pub async fn initiate_session(
 async fn receive_loop(app: AppHandle, mut reader: tokio::io::ReadHalf<tokio::net::TcpStream>) {
     loop {
         match read_framed(&mut reader).await {
-            Ok(frame) => {
-                if let Err(e) = handle_incoming_message(&app, &frame).await {
-                    let err_msg = e.to_string();
+            Ok(frame) => match handle_incoming_message(&app, &frame).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
                     #[cfg(debug_assertions)]
-                    log::warn!("message handling error: {}", err_msg);
-                    // If the peer ended the session, stop the receive loop
-                    if err_msg.contains("peer ended session") {
-                        break;
-                    }
+                    log::warn!("message handling error: {}", e);
+                    let _ = e;
                 }
-            }
+            },
             Err(e) => {
                 #[cfg(debug_assertions)]
                 log::info!("peer stream closed: {}", e);
@@ -477,7 +475,7 @@ struct WireEnvelope {
     t: String,
 }
 
-async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Result<()> {
+async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Result<bool> {
     // Peek at the type field to handle control messages before attempting full parse
     let envelope: WireEnvelope = serde_json::from_slice(frame)?;
 
@@ -486,12 +484,12 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
         let state = app.state::<AppState>();
         *state.session.lock().await = None;
         let _ = app.emit("session_closed", serde_json::json!({ "reason": "peer_ended" }));
-        return Err(anyhow::anyhow!("peer ended session"));
+        return Ok(false);
     }
 
     let wire: WireMessage = serde_json::from_slice(frame)?;
     if wire.t != "msg" {
-        return Ok(());
+        return Ok(true);
     }
 
     let ct = B64
@@ -529,7 +527,7 @@ async fn handle_incoming_message(app: &AppHandle, frame: &[u8]) -> anyhow::Resul
     state.messages.lock().await.push(entry);
     let _ = app.emit("message_received", view);
 
-    Ok(())
+    Ok(true)
 }
 
 /// Close the active session, zeroizing all session key material.
